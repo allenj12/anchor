@@ -1,8 +1,7 @@
 ;;; codegen.ss — Anchor AST → C source
 
 (define *anchor-runtime-h*
-"#pragma once
-#include <stddef.h>
+"#include <stddef.h>
 #include <stdint.h>
 #include <string.h>
 

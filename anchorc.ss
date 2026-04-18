@@ -1,7 +1,10 @@
 ;;; anchorc.ss — Anchor language compiler (Chez Scheme implementation)
 ;;;
 ;;; Usage:
-;;;   chez --script anchorc.ss <file.anc> [options]
+;;;   chez --script anchorc.ss <file.anc> [file2.anc ...] [options]
+;;;
+;;; Multiple input files are concatenated and processed as a single unit,
+;;; producing one C file.  Output name is derived from the first input.
 ;;;
 ;;; Options:
 ;;;   -o <out>       Output file (.c → transpile only; no extension → compile binary)
@@ -33,7 +36,7 @@
 ;; ---------------------------------------------------------------------------
 
 (define (parse-args args)
-  (let ([input    #f]
+  (let ([inputs   '()]
         [output   #f]
         [run?     #f]
         [emit-ast #f]
@@ -62,13 +65,11 @@
               (char=? (string-ref (car rest) 0) #\-))
          (anchor-error "unknown flag" (car rest))]
         [else
-         (if input
-             (anchor-error "multiple input files given")
-             (set! input (car rest)))
+         (set! inputs (append inputs (list (car rest))))
          (loop (cdr rest))]))
     (lambda (key)
       (case key
-        [(input)    input]
+        [(inputs)   inputs]
         [(output)   output]
         [(run?)     run?]
         [(emit-ast) emit-ast]
@@ -118,19 +119,20 @@
             (string-append (current-directory) "/" dir)))))
 
 (define (main . args)
-  (let* ([opts (parse-args args)])
-    (let ([src-path (opts 'input)])
-      (unless src-path
-        (display "usage: anchorc <file.anc> [--emit-ast] [--emit-exp] [--run] [-o out]\n")
-        (exit 1))
-      (unless (file-exists? src-path)
-        (display (string-append "anchorc: file not found: " src-path "\n"))
-        (exit 1))
-      (let* ([src      (read-file src-path)]
-             [ast      (anchor-parse src)]
-             [base     (path-strip-extension src-path)]
-             [cc       (opts 'cc)]
-             [cflags   (opts 'cflags)])
+  (let* ([opts   (parse-args args)]
+         [inputs (opts 'inputs)])
+    (when (null? inputs)
+      (display "usage: anchorc <file.anc> [file2.anc ...] [--emit-ast] [--emit-exp] [--run] [-o out]\n")
+      (exit 1))
+    (for-each (lambda (p)
+                (unless (file-exists? p)
+                  (display (string-append "anchorc: file not found: " p "\n"))
+                  (exit 1)))
+              inputs)
+    (let* ([ast    (apply append (map (lambda (p) (anchor-parse (read-file p))) inputs))]
+           [base   (path-strip-extension (car inputs))]
+           [cc     (opts 'cc)]
+           [cflags (opts 'cflags)])
         (cond
           [(opts 'emit-ast)
            (for-each (lambda (node) (pretty-print node) (newline)) ast)]
@@ -167,7 +169,13 @@
                  (display (string-append "anchorc: cc " c-path " -o " bin-path "\n"))
                  (run-command cmd)))
              (when run?
-               (run-command base)))]))))
+               ;; Prefix with ./ when there's no directory component so the
+               ;; binary is found without needing . in PATH.
+               (run-command
+                 (if (string=? (path-parent base) "")
+                     (string-append "./" base)
+                     base))))])))
+
   (exit 0))
 
 (suppress-greeting #t)
