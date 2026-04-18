@@ -1,0 +1,345 @@
+; macros_showcase.anc — showcase of syntax-rules and syntax-case macros
+;
+; Demonstrates:
+;   1. Simple syntax-rules: unless, when
+;   2. Hygiene: swap! (tmp variable cannot capture user bindings)
+;   3. Recursive syntax-rules: my-and, my-or, my-cond
+;   4. syntax-rules with literals: for (to keyword)
+;   5. syntax-case with expansion-time computation: arena-array
+;   6. syntax-case with guard: unroll (requires literal integer)
+
+(include <stdio.h>)
+
+(ffi printf (const char* ...) -> int)
+
+; ---------------------------------------------------------------------------
+; 1. Simple syntax-rules
+; ---------------------------------------------------------------------------
+
+; when: if without else
+(define-syntax when
+  (syntax-rules ()
+    [(_ cond body ...)
+     (if cond (do body ...) (do))]))
+
+; unless: inverse when
+(define-syntax unless
+  (syntax-rules ()
+    [(_ cond body ...)
+     (if cond (do) (do body ...))]))
+
+; ---------------------------------------------------------------------------
+; 2. Hygiene: swap! introduces a temporary variable
+;    Even if the caller has a local named _tmp, it won't be captured.
+; ---------------------------------------------------------------------------
+
+(define-syntax swap!
+  (syntax-rules ()
+    [(_ a b)
+     (do
+       (let _tmp a)
+       (set! a b)
+       (set! b _tmp))]))
+
+; ---------------------------------------------------------------------------
+; 3. Recursive syntax-rules
+;    my-and and my-or reduce arbitrarily many args via recursive rewriting.
+;    my-cond uses 'else' as a literal so the final clause is recognised.
+; ---------------------------------------------------------------------------
+
+(define-syntax my-and
+  (syntax-rules ()
+    [(_)          1]
+    [(_ e)        e]
+    [(_ e rest ...)
+     (if e (my-and rest ...) 0)]))
+
+(define-syntax my-or
+  (syntax-rules ()
+    [(_)          0]
+    [(_ e)        e]
+    [(_ e rest ...)
+     (if e e (my-or rest ...))]))
+
+(define-syntax my-cond
+  (syntax-rules (else)
+    [(_ (else body ...))
+     (do body ...)]
+    [(_ (test body ...) clause ...)
+     (if test (do body ...) (my-cond clause ...))]))
+
+; ---------------------------------------------------------------------------
+; 4. syntax-rules with a literal keyword
+;    for (var from to limit body...) — 'to' is a literal, not a pattern var.
+; ---------------------------------------------------------------------------
+
+(define-syntax for
+  (syntax-rules (to)
+    [(_ var from to limit body ...)
+     (block
+       (let var from)
+       (while (< var limit)
+         body ...
+         (set! var (+ var 1))))]))
+
+; dotimes: loop n times with index var
+(define-syntax dotimes
+  (syntax-rules ()
+    [(_ (var n) body ...)
+     (block
+       (let var 0)
+       (while (< var n)
+         body ...
+         (set! var (+ var 1))))]))
+
+; ---------------------------------------------------------------------------
+; 5. syntax-case: arena-array
+;
+;    (arena-array name v0 v1 ... vN)
+;
+;    Allocates exactly (N+1)*8 bytes on the arena at expansion time —
+;    the size is a compile-time constant, not a runtime multiply.
+;    Then emits one array-set! per value with literal indices.
+;
+;    This cannot be written as syntax-rules because length/map/iota
+;    must run at expansion time; syntax-rules templates are pure substitution.
+; ---------------------------------------------------------------------------
+
+(define-syntax arena-array
+  (syntax-case ()
+    [(_ name val ...)
+     (let* ([n    (length val)]
+            [size (* n 8)])
+       `(do
+          (let ,name (alloc ,size))
+          ,@(let loop ([i 0] [vs val])
+              (if (null? vs) '()
+                  (cons `(array-set! ,name ,i ,(car vs))
+                        (loop (+ i 1) (cdr vs)))))))]))
+
+; ---------------------------------------------------------------------------
+; 6. Nested macros
+;
+;    assert: expands into a 'when' call — one macro calling another.
+;    min2/max2/clamp: clamp calls both min2 and max2.
+;
+;    The expander re-expands the output, so nested macro calls resolve
+;    to their final expansions in a single pipeline pass.
+; ---------------------------------------------------------------------------
+
+(define-syntax assert
+  (syntax-rules ()
+    [(_ expr msg)
+     (when (! expr)
+       (printf "ASSERT FAIL: %s\n" msg)
+       (return 1))]))
+
+(define-syntax min2
+  (syntax-rules ()
+    [(_ a b) (if (< a b) a b)]))
+
+(define-syntax max2
+  (syntax-rules ()
+    [(_ a b) (if (> a b) a b)]))
+
+; clamp expands to (max2 (min2 x hi) lo) which itself expands further.
+; The expander handles arbitrarily deep nesting.
+(define-syntax clamp
+  (syntax-rules ()
+    [(_ x lo hi) (max2 (min2 x hi) lo)]))
+
+; ---------------------------------------------------------------------------
+; 7. syntax-case that generates multiple definitions: define-struct
+;
+;    (define-struct Name (field size) ...)
+;
+;    Emits at the top level:
+;      (struct Name ...)                  — C struct typedef
+;      (fn make-Name (p_field ...) ...)   — constructor
+;      (fn Name-field (s) ...)            — one accessor per field
+;
+;    The expansion is a (do ...) which expand-all splices into separate
+;    top-level forms, so the codegen sees each definition independently.
+;    All generated names (make-Name, Name-field, p_field) are built from
+;    the user-supplied 'name' and 'field' symbols at expansion time —
+;    this is the key thing syntax-case enables that syntax-rules cannot do.
+; ---------------------------------------------------------------------------
+
+(define-syntax define-struct
+  (syntax-case ()
+    [(_ name (field size) ...)
+     (let* ([sname  (id-sym name)]
+            [cname  (string->symbol
+                      (string-append "make-" (symbol->string sname)))]
+            [pnames (map (lambda (f)
+                           (string->symbol
+                             (string-append "p_" (symbol->string (id-sym f)))))
+                         field)]
+            [anames (map (lambda (f)
+                           (string->symbol
+                             (string-append (symbol->string sname) "-" (symbol->string (id-sym f)))))
+                         field)])
+       `(do
+          (struct ,name ,@(map list field size))
+          (fn ,cname (,@pnames)
+            (let _ptr (alloc (sizeof-struct ,name)))
+            ,@(map (lambda (f p) `(field-set! ,sname _ptr ,f ,p)) field pnames)
+            (return _ptr))
+          ,@(map (lambda (aname f)
+                   `(fn ,aname (s) (return (field-get ,sname s ,f))))
+                 anames field)))]))
+
+; ---------------------------------------------------------------------------
+; 6. syntax-case with guard: unroll
+;
+;    (unroll N body ...)
+;
+;    N must be a literal integer (enforced by guard).
+;    Repeats body exactly N times inline — no loop overhead.
+;    Useful for hot inner loops where the trip count is a compile-time constant.
+; ---------------------------------------------------------------------------
+
+(define-syntax unroll
+  (syntax-case ()
+    [(_ n body ...)
+     (number? n)
+     `(do ,@(apply append (map (lambda (_) body) (iota n))))]))
+
+; ---------------------------------------------------------------------------
+; 8. A macro that outputs a macro: define-fold-op
+;
+;    (define-fold-op name op identity)
+;
+;    Generates a new variadic macro 'name' that folds 'op' over its arguments
+;    with 'identity' as the zero-argument case.  The inner syntax-rules has a
+;    recursive clause that calls 'name' — but 'name' is only known at the time
+;    the outer macro runs, so you cannot write this with a single syntax-rules.
+;
+;    (define-fold-op my-add + 0)  →  defines:
+;      (define-syntax my-add
+;        (syntax-rules ()
+;          [(_)         0]
+;          [(_ x)       x]
+;          [(_ x r ...) (+ x (my-add r ...))]))
+;
+;    The outer macro runs once at compile time, writing the inner define-syntax
+;    into the expansion stream.  expand-all re-expands that output, registering
+;    the new macro.  Subsequent uses of my-add are expanded normally.
+; ---------------------------------------------------------------------------
+
+; syntax-rules cannot be used here.  The outer template contains 'r ...' which
+; the outer instantiator would try to expand as an ellipsis substitution —
+; but 'r' is not a pattern variable of the outer macro.
+; syntax-case with quasiquote treats the inner template as plain data: 'r'
+; and '...' are just symbols being cons'd into a list, never evaluated as
+; ellipsis by the outer transformer.
+(define-syntax define-fold-op
+  (syntax-case ()
+    [(_ name op identity)
+     `(define-syntax ,name
+        (syntax-rules ()
+          [(_)         ,identity]
+          [(_ x)       x]
+          [(_ x r ...) (,op x (,name r ...))]))]))
+
+(define-fold-op my-add + 0)
+(define-fold-op my-mul * 1)
+
+; ---------------------------------------------------------------------------
+; Use define-struct: emits struct + constructor + accessors as top-level forms.
+; expand-all splices the resulting (do ...) so codegen sees each independently.
+; ---------------------------------------------------------------------------
+
+(define-struct Vec2 (x 8) (y 8))
+
+; ---------------------------------------------------------------------------
+; main: exercise every macro above
+; ---------------------------------------------------------------------------
+
+(with-arena
+  (fn main ()
+
+    ; --- when / unless ---
+    (let x 7)
+    (when (> x 5)
+      (printf "when: x > 5\n"))
+    (unless (> x 10)
+      (printf "unless: x <= 10\n"))
+
+    ; --- swap! hygiene ---
+    ; We also declare a local called _tmp to prove it isn't captured.
+    (let a 10)
+    (let b 20)
+    (let _tmp 999)
+    (swap! a b)
+    (printf "swap: a=%d b=%d _tmp=%d (999 means no capture)\n"
+      (cast int a) (cast int b) (cast int _tmp))
+
+    ; --- my-and / my-or ---
+    (let t 1)
+    (let f 0)
+    (printf "my-and(1,1,0)=%d\n" (cast int (my-and t t f)))
+    (printf "my-or(0,0,1)=%d\n"  (cast int (my-or  f f t)))
+
+    ; --- my-cond ---
+    (let score 75)
+    (my-cond
+      ((>= score 90) (printf "grade: A\n"))
+      ((>= score 75) (printf "grade: B\n"))
+      ((>= score 60) (printf "grade: C\n"))
+      (else          (printf "grade: F\n")))
+
+    ; --- for loop with 'to' literal ---
+    (printf "squares:")
+    (for i 1 to 6
+      (printf " %d" (cast int (* i i))))
+    (printf "\n")
+
+    ; --- dotimes ---
+    (let sum 0)
+    (dotimes (i 10)
+      (set! sum (+ sum i)))
+    (printf "sum 0..9 = %d\n" (cast int sum))
+
+    ; --- arena-array: size computed at expansion time ---
+    ; (arena-array primes 2 3 5 7 11 13)
+    ; expands to: (let primes (alloc 48))   ; 6*8, a literal
+    ;             (array-set! primes 0 2)
+    ;             ...
+    (arena-array primes 2 3 5 7 11 13)
+    (printf "primes:")
+    (for i 0 to 6
+      (printf " %d" (cast int (array-get primes i))))
+    (printf "\n")
+
+    ; --- unroll: loop body repeated inline, no branch overhead ---
+    ; (unroll 4 (printf "tick\n"))
+    ; expands to four sequential printf calls with no loop.
+    (let ticks 0)
+    (unroll 4
+      (set! ticks (+ ticks 1)))
+    (printf "ticks after unroll(4): %d\n" (cast int ticks))
+
+    ; --- define-fold-op generated macros ---
+    (printf "my-add()=%d\n"        (cast int (my-add)))
+    (printf "my-add(1,2,3,4)=%d\n" (cast int (my-add 1 2 3 4)))
+    (printf "my-mul(2,3,4)=%d\n"   (cast int (my-mul 2 3 4)))
+
+    ; --- assert: nested macro (assert expands into when, which expands further) ---
+    (let ok 1)
+    (assert ok "ok should be true")          ; passes — no output
+    (printf "assert: passed (no crash)\n")
+
+    ; --- clamp: nested macro (clamp -> max2 -> if, min2 -> if) ---
+    (let clamped (clamp 150 0 100))
+    (printf "clamp(150,0,100) = %d\n" (cast int clamped))
+    (let clamped2 (clamp -5 0 100))
+    (printf "clamp(-5,0,100)  = %d\n" (cast int clamped2))
+
+    ; --- define-struct generated accessors and constructor ---
+    ; define-struct emitted: struct Vec2, make-Vec2, Vec2-x, Vec2-y
+    ; at the top level above.  Here we use them normally.
+    (let v (make-Vec2 3 4))
+    (printf "Vec2: x=%d y=%d\n"
+      (cast int (Vec2-x v))
+      (cast int (Vec2-y v)))))

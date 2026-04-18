@@ -1,0 +1,40 @@
+; array.anc — bubble sort
+; Shows: array-get/set!, alloc, for macro, nested loops, helper functions
+
+(include <stdio.h>)
+(ffi printf (const char* ...) -> int)
+
+(define-syntax for
+  (syntax-rules (to)
+    [(_ var from to limit body ...)
+     (block
+       (let var from)
+       (while (< var limit)
+         body ...
+         (set! var (+ var 1))))]))
+
+(fn print-array (arr n)
+  (for i 0 to n
+    (printf "%d " (cast int (array-get arr i 8))))
+  (printf "\n"))
+
+(fn bubble-sort (arr n)
+  (for i 0 to n
+    (for j 0 to (- n (+ i 1))
+      (let a (array-get arr j 8))
+      (let b (array-get arr (+ j 1) 8))
+      (if (> a b)
+        (do
+          (array-set! arr j b 8)
+          (array-set! arr (+ j 1) a 8))
+        (do)))))
+
+(with-arena
+  (fn main ()
+    (let arr (alloc (* 9 8)))
+    (array-set! arr 0 42 8) (array-set! arr 1  7 8) (array-set! arr 2 19 8)
+    (array-set! arr 3  3 8) (array-set! arr 4 55 8) (array-set! arr 5 12 8)
+    (array-set! arr 6 28 8) (array-set! arr 7  1 8) (array-set! arr 8 33 8)
+    (printf "before: ") (print-array arr 9)
+    (bubble-sort arr 9)
+    (printf "after:  ") (print-array arr 9)))

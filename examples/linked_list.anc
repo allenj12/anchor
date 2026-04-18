@@ -1,0 +1,108 @@
+; linked_list.anc — singly-linked lists using built-in cons/car/cdr
+; Shows: cons, car, cdr, nil, null?, recursive list operations,
+;        building and walking lists
+
+(ffi printf (const char* ...) -> int)
+
+; ---------------------------------------------------------------------------
+; cons allocates from the current arena — no explicit arena arg needed.
+; (cons val next) → an AnchorVal whose .ptr points to a 2-slot cell.
+; car/cdr extract the head and tail.  nil is the empty list; null? tests it.
+; ---------------------------------------------------------------------------
+
+; Build a list from an array — (list-from-arr arr n) → linked list
+(fn list-from-arr (arr n)
+  (let lst nil)
+  (let i (- n 1))
+  (while (>= i 0)
+    (set! lst (cons (array-get arr i 8) lst))
+    (set! i (- i 1)))
+  (return lst))
+
+; Length of a list
+(fn list-length (lst)
+  (let n 0)
+  (let cur lst)
+  (while (! (null? cur))
+    (set! n (+ n 1))
+    (set! cur (cdr cur)))
+  (return n))
+
+; Sum of integer elements
+(fn list-sum (lst)
+  (let acc 0)
+  (let cur lst)
+  (while (! (null? cur))
+    (set! acc (+ acc (car cur)))
+    (set! cur (cdr cur)))
+  (return acc))
+
+; Print elements separated by spaces
+(fn print-list (lst)
+  (printf "(")
+  (let cur lst)
+  (while (! (null? cur))
+    (printf "%d" (cast int (car cur)))
+    (set! cur (cdr cur))
+    (if (! (null? cur))
+      (printf " ")
+      (do)))
+  (printf ")"))
+
+; Reverse a list — builds new list in caller's arena
+(fn list-reverse (lst)
+  (let acc nil)
+  (let cur lst)
+  (while (! (null? cur))
+    (set! acc (cons (car cur) acc))
+    (set! cur (cdr cur)))
+  (return acc))
+
+; Filter: keep elements where predicate holds (pred is a function pointer — not
+; yet supported, so we inline a specific filter: keep evens)
+(fn list-filter-even (lst)
+  (let acc nil)
+  (let cur lst)
+  (while (! (null? cur))
+    (let v (car cur))
+    (if (== (% v 2) 0)
+      (set! acc (cons v acc))
+      (do))
+    (set! cur (cdr cur)))
+  (return (list-reverse acc)))
+
+; ---------------------------------------------------------------------------
+; main
+; ---------------------------------------------------------------------------
+
+(with-arena
+  (fn main ()
+
+    ; Build a list from literal values
+    (let lst (cons 1 (cons 2 (cons 3 (cons 4 (cons 5 nil))))))
+
+    (printf "list:    ")
+    (print-list lst)
+    (printf "\n")
+
+    (printf "length:  %d\n" (cast int (list-length lst)))
+    (printf "sum:     %d\n" (cast int (list-sum lst)))
+
+    (let rev (list-reverse lst))
+    (printf "reverse: ")
+    (print-list rev)
+    (printf "\n")
+
+    (let evens (list-filter-even lst))
+    (printf "evens:   ")
+    (print-list evens)
+    (printf "\n")
+
+    ; Build from array
+    (let arr (alloc (* 6 8)))
+    (array-set! arr 0 10 8) (array-set! arr 1 20 8) (array-set! arr 2 30 8)
+    (array-set! arr 3 40 8) (array-set! arr 4 50 8) (array-set! arr 5 60 8)
+    (let from-arr (list-from-arr arr 6))
+    (printf "from arr: ")
+    (print-list from-arr)
+    (printf "\n")))

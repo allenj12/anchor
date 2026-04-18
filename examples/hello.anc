@@ -1,0 +1,8 @@
+; hello.anc — Hello World
+
+(include <stdio.h>)
+(ffi printf (const char* ...) -> int)
+
+(with-arena
+  (fn main ()
+    (printf "Hello, Anchor!\n")))
