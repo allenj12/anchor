@@ -136,6 +136,33 @@ Use `(c-const NAME)` to pull in a C preprocessor constant at compile time:
     ))
 ```
 
+`global-arena` declares a named arena whose backing buffer lives for the entire
+program. Use it when allocations need to outlive the function that creates them —
+linked lists, trees, or any per-request scratch buffer that gets rebuilt in a loop.
+
+```anchor
+(global-arena scratch 65536)   ; 64 KiB, allocated once
+
+(fn build-list (n)
+  (with-arena scratch           ; directs allocations into scratch
+    (let result nil)
+    (while (> n 0)
+      (set! result (cons n result))
+      (set! n (- n 1)))
+    (return result)))           ; safe — scratch is never freed
+
+(fn main ()
+  (let lst (build-list 5))
+  ; ... use lst ...
+  (arena-reset! scratch)        ; reclaim all allocations in O(1)
+  (let lst2 (build-list 3))     ; reuse same backing memory
+  )
+```
+
+Returning a list from a `with-arena scratch` block is safe because the backing
+memory is permanent. Contrast with anonymous `with-arena` scopes, where returning
+a linked structure would dangle — only flat values copy out correctly there.
+
 `(ref expr)` takes a stack address; `(deref ptr)` reads through one. Useful for
 passing values by pointer to C functions that write into them.
 
@@ -406,6 +433,7 @@ constructor, and accessor functions:
 | `examples/fizzbuzz.anc` | Functions, `while`, conditionals, `%` |
 | `examples/array.anc` | `alloc`, `array-get/set!`, bubble sort, `for` macro |
 | `examples/linked_list.anc` | `cons`/`car`/`cdr`/`nil`/`null?`, list operations |
+| `examples/global_arena.anc` | `global-arena`, `arena-reset!`, lists escaping function scope |
 | `examples/structs.anc` | Structs, nested structs, unions, enums, array-of-structs |
 | `examples/macros_showcase.anc` | Full macro spectrum: `syntax-rules` → `syntax-case` → macros defining macros |
 
@@ -418,9 +446,10 @@ store their integer value in the `ptr` field with the high bit of `size` set as 
 This means everything flows through a uniform ABI — no overloaded calling conventions,
 no special-casing for primitives.
 
-**Arenas, not GC.** `alloc` bumps a pointer. The arena is freed in one shot when the
-enclosing `with-arena` function returns. Nested arenas are supported — each function
-can have its own, and they stack. `cons` allocates from the current arena automatically.
+**Arenas, not GC.** `alloc` bumps a pointer. Anonymous `with-arena` scopes free all
+allocations when the block exits. `global-arena` declares a named arena with permanent
+backing memory — reset it explicitly with `arena-reset!` when you want to reclaim.
+Arenas nest and stack; `cons` and `alloc` always use the innermost active arena.
 
 **C as the backend.** The compiler emits a single `.c` file with no dependencies
 beyond `anchor.h` (included from `anchor/runtime/`). You can inspect, modify, or

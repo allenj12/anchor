@@ -20,7 +20,7 @@
   '(do block let set! if while return fn ffi include
     cast alloc ref deref ptr-add array-get array-set!
     field-get field-set! sizeof-struct with-arena struct
-    global global-set! extern-global const
+    global global-set! extern-global const global-arena arena-reset!
     define-syntax syntax-rules syntax-case quote quasiquote unquote unquote-splicing
     embed-bytes embed-string
     cons car cdr nil null?

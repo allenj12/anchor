@@ -239,14 +239,15 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a) {
     (mutable fwd-decls    ctx-fwd-decls    ctx-fwd-decls-set!)
     (mutable globals      ctx-globals      ctx-globals-set!)
     (mutable arena-depth  ctx-arena-depth  ctx-arena-depth-set!)
-    (mutable var-depth    ctx-var-depth    ctx-var-depth-set!))
+    (mutable var-depth    ctx-var-depth    ctx-var-depth-set!)
+    (mutable global-arenas ctx-global-arenas ctx-global-arenas-set!))
   (protocol
     (lambda (new)
       (lambda ()
         (new '() 0 0
              (make-eq-hashtable) (make-eq-hashtable) (make-eq-hashtable)
              '() #f '() '() 0
-             (make-eq-hashtable))))))
+             (make-eq-hashtable) (make-eq-hashtable))))))
 
 (define (ctx-emit! ctx line)
   (ctx-lines-set! ctx
@@ -262,12 +263,15 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a) {
     (ctx-tmp-n-set! ctx (fx+ n 1))
     (string-append "_anc_t" (number->string n))))
 
-(define (ctx-push-arena! ctx av) (ctx-arena-stack-set! ctx (cons av (ctx-arena-stack ctx))))
+(define (ctx-push-arena! ctx av global?)
+  (ctx-arena-stack-set! ctx (cons (cons av global?) (ctx-arena-stack ctx))))
 (define (ctx-pop-arena!  ctx)    (ctx-arena-stack-set! ctx (cdr (ctx-arena-stack ctx))))
 (define (ctx-in-arena?   ctx)    (pair? (ctx-arena-stack ctx)))
+(define (ctx-arena-top-global? ctx)
+  (and (pair? (ctx-arena-stack ctx)) (cdar (ctx-arena-stack ctx))))
 
 (define (ctx-arena-cleanup ctx)
-  (map (lambda (av) (string-append "_anchor_arena_top = " av ".prev;"))
+  (map (lambda (entry) (string-append "_anchor_arena_top = " (car entry) ".prev;"))
        (ctx-arena-stack ctx)))
 
 (define (ctx-output ctx) (str-join (reverse (ctx-lines ctx)) "\n"))
@@ -771,7 +775,7 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a) {
                          (pre-emit! pre ctx)
                          (cond
                            [(string=? ret "AnchorVal")
-                            (if (ctx-in-arena? ctx)
+                            (if (and (ctx-in-arena? ctx) (not (ctx-arena-top-global? ctx)))
                                 (let ([tmp (ctx-tmp! ctx)])
                                   (ctx-emit! ctx (string-append "AnchorVal " tmp "_inner = " e ";"))
                                   (ctx-emit! ctx (string-append "if (_ANCH_IS_UNBOXED(" tmp "_inner)) {"))
@@ -901,6 +905,14 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a) {
                   [val (emit-expr (cadr args) ctx pre)])
              (pre-emit! pre ctx)
              (ctx-emit! ctx (string-append (c-ident (car args)) " = " val ";")))]
+
+          ;; arena-reset!
+          [(eq? h 'arena-reset!)
+           (unless (and (fx= (length args) 1) (symbol? (car args)))
+             (anchor-error "arena-reset!: (arena-reset! name)"))
+           (let ([cname (hashtable-ref (ctx-global-arenas ctx) (car args) #f)])
+             (unless cname (anchor-error "arena-reset!: not a declared global-arena" (car args)))
+             (ctx-emit! ctx (string-append cname ".used = 0;")))]
 
           ;; extern-global
           [(eq? h 'extern-global)
@@ -1187,7 +1199,7 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a) {
                 (ctx-emit! ctx (string-append "char " av "_buf[" cap "];")))
             (ctx-emit! ctx (string-append "AnchorArena " av " = {(char*)" av "_buf, " cap ", 0, _anchor_arena_top};"))
             (ctx-emit! ctx (string-append "_anchor_arena_top = &" av ";"))
-            (ctx-push-arena! ctx av)
+            (ctx-push-arena! ctx av #f)
             (ctx-arena-depth-set! ctx (fx+ (ctx-arena-depth ctx) 1))))
         (for-each (lambda (s) (emit-stmt s ctx)) body)
         (let* ([last (and (pair? body) (list-ref body (fx- (length body) 1)))]
@@ -1209,31 +1221,67 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a) {
 
 (define (emit-with-arena node ctx)
   (let* ([items (cdr node)]
-         [sz    (if (and (pair? items) (number? (car items))) (exact (car items)) 0)]
-         [body  (if (and (pair? items) (number? (car items))) (cdr items) items)])
-    (when (null? body) (anchor-error "with-arena: empty body"))
-    (if (for-all (lambda (f) (and (pair? f) (eq? (car f) 'fn))) body)
-        (for-each (lambda (f) (emit-fn f ctx sz)) body)
-        ;; Inline arena block
-        (let* ([cap      (if (fx> sz 0) (number->string sz) "ANCHOR_DEFAULT_ARENA_CAP")]
-               [av       (string-append "_anc_arena_" (ctx-tmp! ctx))]
-               [use-heap (fx> sz 1048576)])
-          (ctx-emit! ctx "{")
-          (ctx-indent! ctx)
-          (if use-heap
-              (ctx-emit! ctx (string-append "char* " av "_buf = (char*)__builtin_malloc(" cap ");"))
-              (ctx-emit! ctx (string-append "char " av "_buf[" cap "];")))
-          (ctx-emit! ctx (string-append "AnchorArena " av " = {(char*)" av "_buf, " cap ", 0, _anchor_arena_top};"))
-          (ctx-emit! ctx (string-append "_anchor_arena_top = &" av ";"))
-          (ctx-push-arena! ctx av)
-          (ctx-arena-depth-set! ctx (fx+ (ctx-arena-depth ctx) 1))
-          (for-each (lambda (f) (emit-stmt f ctx)) body)
-          (ctx-emit! ctx (string-append "_anchor_arena_top = " av ".prev;"))
-          (when use-heap (ctx-emit! ctx (string-append "__builtin_free(" av "_buf);")))
-          (ctx-pop-arena! ctx)
-          (ctx-arena-depth-set! ctx (fx- (ctx-arena-depth ctx) 1))
-          (ctx-dedent! ctx)
-          (ctx-emit! ctx "}")))))
+         [first (and (pair? items) (car items))])
+    (cond
+      ;; (with-arena name body...) — use existing global arena, no alloc/reset
+      [(and (symbol? first) (not (number? first)))
+       (let* ([name  first]
+              [body  (cdr items)]
+              [cname (hashtable-ref (ctx-global-arenas ctx) name #f)])
+         (unless cname (anchor-error "with-arena: not a declared global-arena" name))
+         (when (null? body) (anchor-error "with-arena: empty body"))
+         (ctx-emit! ctx "{")
+         (ctx-indent! ctx)
+         (ctx-emit! ctx (string-append cname ".prev = _anchor_arena_top;"))
+         (ctx-emit! ctx (string-append "_anchor_arena_top = &" cname ";"))
+         (ctx-push-arena! ctx cname #t)
+         (ctx-arena-depth-set! ctx (fx+ (ctx-arena-depth ctx) 1))
+         (for-each (lambda (f) (emit-stmt f ctx)) body)
+         (ctx-emit! ctx (string-append "_anchor_arena_top = " cname ".prev;"))
+         (ctx-pop-arena! ctx)
+         (ctx-arena-depth-set! ctx (fx- (ctx-arena-depth ctx) 1))
+         (ctx-dedent! ctx)
+         (ctx-emit! ctx "}"))]
+      ;; (with-arena size body...) or (with-arena body...) — anonymous scoped arena
+      [else
+       (let* ([sz   (if (number? first) (exact first) 0)]
+              [body (if (number? first) (cdr items) items)])
+         (when (null? body) (anchor-error "with-arena: empty body"))
+         (if (for-all (lambda (f) (and (pair? f) (eq? (car f) 'fn))) body)
+             (for-each (lambda (f) (emit-fn f ctx sz)) body)
+             (let* ([cap      (if (fx> sz 0) (number->string sz) "ANCHOR_DEFAULT_ARENA_CAP")]
+                    [av       (string-append "_anc_arena_" (ctx-tmp! ctx))]
+                    [use-heap (fx> sz 1048576)])
+               (ctx-emit! ctx "{")
+               (ctx-indent! ctx)
+               (if use-heap
+                   (ctx-emit! ctx (string-append "char* " av "_buf = (char*)__builtin_malloc(" cap ");"))
+                   (ctx-emit! ctx (string-append "char " av "_buf[" cap "];")))
+               (ctx-emit! ctx (string-append "AnchorArena " av " = {(char*)" av "_buf, " cap ", 0, _anchor_arena_top};"))
+               (ctx-emit! ctx (string-append "_anchor_arena_top = &" av ";"))
+               (ctx-push-arena! ctx av #f)
+               (ctx-arena-depth-set! ctx (fx+ (ctx-arena-depth ctx) 1))
+               (for-each (lambda (f) (emit-stmt f ctx)) body)
+               (ctx-emit! ctx (string-append "_anchor_arena_top = " av ".prev;"))
+               (when use-heap (ctx-emit! ctx (string-append "__builtin_free(" av "_buf);")))
+               (ctx-pop-arena! ctx)
+               (ctx-arena-depth-set! ctx (fx- (ctx-arena-depth ctx) 1))
+               (ctx-dedent! ctx)
+               (ctx-emit! ctx "}"))))])))
+
+(define (emit-global-arena node ctx)
+  ;; (global-arena name size)
+  (let* ([items (cdr node)]
+         [name  (car items)]
+         [size  (cadr items)]
+         [cname (string-append "_anc_ga_" (c-ident name))]
+         [cap   (number->string (exact size))])
+    (hashtable-set! (ctx-global-arenas ctx) name cname)
+    (ctx-globals-set! ctx
+      (append (ctx-globals ctx)
+              (list (string-append "static char " cname "_buf[" cap "];"))
+              (list (string-append "static AnchorArena " cname
+                                   " = {" cname "_buf, " cap ", 0, NULL};"))))))
 
 (define (emit-global node ctx const?)
   (let* ([name  (cadr node)]
@@ -1290,11 +1338,12 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a) {
             (if (not (pair? e))
                 (loop (cdr es) body)
                 (case (car e)
-                  [(extern-global) (emit-stmt e ctx)      (loop (cdr es) body)]
-                  [(ffi)           (emit-ffi  e ctx)      (loop (cdr es) body)]
-                  [(include)       (emit-stmt e ctx)      (loop (cdr es) body)]
-                  [(global)        (emit-global e ctx #f) (loop (cdr es) body)]
-                  [(const)         (emit-global e ctx #t) (loop (cdr es) body)]
+                  [(extern-global) (emit-stmt e ctx)           (loop (cdr es) body)]
+                  [(ffi)           (emit-ffi  e ctx)           (loop (cdr es) body)]
+                  [(include)       (emit-stmt e ctx)           (loop (cdr es) body)]
+                  [(global)        (emit-global e ctx #f)      (loop (cdr es) body)]
+                  [(const)         (emit-global e ctx #t)      (loop (cdr es) body)]
+                  [(global-arena)  (emit-global-arena e ctx)   (loop (cdr es) body)]
                   [(struct)        (emit-struct e ctx #t) (loop (cdr es) body)]
                   [(unpacked-struct) (emit-struct e ctx #f) (loop (cdr es) body)]
                   [(union)         (emit-union  e ctx)    (loop (cdr es) body)]
