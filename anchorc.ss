@@ -160,10 +160,8 @@
                                [else #f])])
              (write-c-file c-src c-path)
              (when bin-path
-               (let* ([runtime-dir (string-append (effective-compiler-dir) "/anchor/runtime")]
-                      [flags (if (string=? cflags "") "" (string-append " " cflags))]
+               (let* ([flags (if (string=? cflags "") "" (string-append " " cflags))]
                       [cmd (string-append cc " " c-path
-                                         " -I" runtime-dir
                                          flags
                                          " -o " bin-path)])
                  (display (string-append "anchorc: cc " c-path " -o " bin-path "\n"))

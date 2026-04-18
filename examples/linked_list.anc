@@ -2,6 +2,8 @@
 ; Shows: cons, car, cdr, nil, null?, recursive list operations,
 ;        building and walking lists
 
+(include <stdio.h>)
+
 (ffi printf (const char* ...) -> int)
 
 ; ---------------------------------------------------------------------------
