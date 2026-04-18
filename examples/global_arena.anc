@@ -1,0 +1,51 @@
+; global_arena.anc — long-lived named arenas
+;
+; global-arena declares a named arena with a fixed backing buffer that lives
+; for the lifetime of the program.  Unlike with-arena (which allocates and
+; frees on every function call), the backing memory is never freed — you
+; control when allocations are reclaimed by calling arena-reset!.
+;
+; This makes global arenas the right tool for:
+;   - Linked lists / trees that need to escape a function's scope
+;   - Buffers that are rebuilt repeatedly (e.g. per-frame or per-request)
+;   - Any data that must outlive the function that creates it
+
+(include <stdio.h>)
+
+(ffi printf (const char* ...) -> int)
+
+; Declare a named global arena with a 64 KiB backing buffer.
+; The buffer is static — allocated once, never freed.
+(global-arena scratch 65536)
+
+; Build a linked list of integers [n, n-1, ..., 1] in the global arena.
+; Returning a pointer into a global arena is always safe — nothing is freed.
+(fn build-list (n)
+  (with-arena scratch
+    (let result nil)
+    (while (> n 0)
+      (set! result (cons n result))
+      (set! n (- n 1)))
+    (return result)))
+
+(fn print-list (lst)
+  (while (! (null? lst))
+    (printf "%d " (cast int (car lst)))
+    (set! lst (cdr lst)))
+  (printf "\n"))
+
+(fn main ()
+  ; First list — lives in scratch
+  (let lst1 (build-list 5))
+  (printf "list 1: ")
+  (print-list lst1)
+
+  ; Reset scratch — reclaims all allocations in one shot, O(1)
+  (arena-reset! scratch)
+
+  ; Reuse the same backing memory for a second list
+  (let lst2 (build-list 3))
+  (printf "list 2: ")
+  (print-list lst2)
+
+  (return 0))
