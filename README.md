@@ -343,6 +343,17 @@ Templates are plain Chez Scheme code. Pattern variables bind to the matched Anch
 AST values. This lets you run arbitrary computation — `length`, `map`, `iota`, string
 manipulation — before emitting a single line of C.
 
+Three template styles are available inside `macro-case` clause bodies:
+
+| Style | Ellipsis vars | Ellipsis in template |
+|-------|--------------|----------------------|
+| `` ` `` (Chez quasiquote) | plain Chez lists | `,@var` to splice |
+| `#'` (syntax template) | plain Chez lists | `var ...` via pattern engine |
+| `` #` `` (quasisyntax) | plain Chez lists | `var ...` via pattern engine, `#,expr` for escapes |
+
+With backtick, `body ...` in the template is a literal symbol pair — use `,@body` to splice.
+With `#'` or `` #` ``, the pattern engine handles `var ...` expansion directly.
+
 **`arena-array` — size computed at expand time, indices are literals:**
 
 ```anchor
