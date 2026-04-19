@@ -615,6 +615,47 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a) {
                   (pre-add! pre (string-append tmp " = " le ";")))
                 tmp))]
 
+         ;; fn-ptr: take the address of a named Anchor function as an AnchorVal.
+         ;; Use void* as the FFI param type when passing to C callbacks.
+         [(eq? h 'fn-ptr)
+          (unless (fx= (length args) 1) (anchor-error "fn-ptr: (fn-ptr name)"))
+          (string-append "anchor_ptr((void*)" (c-ident (car args)) ", 0)")]
+
+         ;; call-ptr: call through a function pointer stored in an AnchorVal.
+         ;; (call-ptr fp arg ...) — AnchorVal ABI only (fn functions).
+         [(eq? h 'call-ptr)
+          (when (null? args) (anchor-error "call-ptr: (call-ptr fp arg ...)"))
+          (let* ([fp         (emit-expr (car args) ctx pre)]
+                 [c-args     (map (lambda (a) (emit-expr a ctx pre)) (cdr args))]
+                 [param-types (if (null? c-args) "void"
+                                  (str-join (map (lambda (_) "AnchorVal") c-args) ", "))]
+                 [fn-cast    (string-append "((AnchorVal(*)(" param-types "))" fp ".ptr)")])
+            (string-append fn-cast "(" (str-join c-args ", ") ")"))]
+
+         ;; call-ptr-c: call through a C-typed function pointer.
+         ;; (call-ptr-c fp ((param-type ...) -> ret-type)  arg ...)
+         [(eq? h 'call-ptr-c)
+          (when (fx< (length args) 2)
+            (anchor-error "call-ptr-c: (call-ptr-c fp ((param-type ...) -> ret-type) arg ...)"))
+          (let* ([fp-expr   (car args)]
+                 [sig       (cadr args)]   ; ((param-type...) -> ret-type)
+                 [call-args (cddr args)]
+                 [params    (car sig)]
+                 [ret-str   (if (and (fx>= (length sig) 3) (eq? (cadr sig) '->))
+                                (cast-type-str (caddr sig))
+                                (anchor-error "call-ptr-c: sig must be ((types...) -> ret)"))]
+                 [fp        (emit-expr fp-expr ctx pre)]
+                 [ptypes    (parse-ffi-params params)]
+                 [ptypes-s  (if (null? ptypes) "void" (str-join ptypes ", "))]
+                 [fn-cast   (string-append "((" ret-str "(*)(" ptypes-s "))" fp ".ptr)")]
+                 [c-args    (let loop ([as call-args] [i 0] [acc '()])
+                              (if (null? as) (reverse acc)
+                                  (loop (cdr as) (fx+ i 1)
+                                        (cons (emit-call-arg (car as) ctx pre #t
+                                                             (ffi-param-type ptypes i))
+                                              acc))))])
+            (wrap-extern-ret (string-append fn-cast "(" (str-join c-args ", ") ")") ret-str ctx pre))]
+
          ;; function call (plain symbol or stx — strip marks via c-ident)
          [(or (symbol? h) (stx? h))
           (let* ([hs  (id-sym h)]
@@ -1316,6 +1357,66 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a) {
        (anchor-error (if const? "const: initializer must be a number"
                                 "global: initializer must be number or (alloc N)"))])))
 
+(define (emit-fn-c node ctx)
+  ;; (fn-c name ((type... pname) ...) -> ret-type  body ...)
+  ;; Emits a C-native-signature function.  Parameters are wrapped as AnchorVals
+  ;; inside the body so normal Anchor expressions work.  The return statement
+  ;; casts back to the declared C return type.
+  ;; The function is also registered in the externs table so Anchor call sites
+  ;; get the correct FFI casting without a separate ffi declaration.
+  (unless (fx>= (length node) 4)
+    (anchor-error "fn-c: (fn-c name ((type... pname) ...) -> ret-type body...)"))
+  (let* ([name      (cadr node)]
+         [params    (caddr node)]
+         [rest      (cdddr node)]
+         [ret-str   (if (and (fx>= (length rest) 2) (eq? (car rest) '->))
+                        (cast-type-str (cadr rest))
+                        (anchor-error "fn-c: missing -> ret-type"))]
+         [body      (if (and (fx>= (length rest) 2) (eq? (car rest) '->))
+                        (cddr rest) rest)]
+         [cname     (c-ident name)]
+         ;; Each param is (type-token ... param-name); last token is the name.
+         [parsed    (map (lambda (p)
+                           (let* ([syms   (map symbol->string p)]
+                                  [n      (length syms)]
+                                  [pname  (list-ref syms (fx- n 1))]
+                                  [type-s (str-join (list-head syms (fx- n 1)) " ")])
+                             (cons type-s pname)))
+                         params)]
+         [c-params  (str-join (map (lambda (p)
+                                     (string-append (car p) " _raw_" (cdr p)))
+                                   parsed) ", ")]
+         [c-sig     (string-append ret-str " " cname
+                                   "(" (if (null? parsed) "void" c-params) ")")]
+         [param-types (map car parsed)])
+    ;; Register so (name arg ...) call sites get FFI casting without ffi decl
+    (hashtable-set! (ctx-externs ctx) (id-sym name) (cons ret-str param-types))
+    ;; Forward declaration
+    (ctx-fwd-decls-set! ctx (append (ctx-fwd-decls ctx)
+                                    (list (string-append c-sig ";"))))
+    ;; Function definition
+    (ctx-emit! ctx (string-append c-sig " {"))
+    (ctx-indent! ctx)
+    ;; Wrap each raw C parameter as an AnchorVal for the body
+    (for-each (lambda (p)
+                (let* ([c-type (car p)]
+                       [pname  (cdr p)]
+                       [raw    (string-append "_raw_" pname)]
+                       [wrap   (if (pointer-type? c-type)
+                                   (string-append "AnchorVal " pname
+                                                  " = anchor_ptr((void*)" raw ", 0);")
+                                   (string-append "AnchorVal " pname
+                                                  " = anchor_int((intptr_t)" raw ");"))])
+                  (ctx-emit! ctx wrap)))
+              parsed)
+    ;; Emit body; ctx-fn-ret set so return emits the right C cast
+    (let ([prev-ret (ctx-fn-ret ctx)])
+      (ctx-fn-ret-set! ctx ret-str)
+      (for-each (lambda (s) (emit-stmt s ctx)) body)
+      (ctx-fn-ret-set! ctx prev-ret))
+    (ctx-dedent! ctx)
+    (ctx-emit! ctx "}")))
+
 ;; ---------------------------------------------------------------------------
 ;; Entry point
 ;; ---------------------------------------------------------------------------
@@ -1344,6 +1445,7 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a) {
                 (case (car e)
                   [(extern-global) (emit-stmt e ctx)           (loop (cdr es) body)]
                   [(ffi)           (emit-ffi  e ctx)           (loop (cdr es) body)]
+                  [(fn-c)          (emit-fn-c e ctx)           (loop (cdr es) body)]
                   [(include)       (emit-stmt e ctx)           (loop (cdr es) body)]
                   [(global)        (emit-global e ctx #f)      (loop (cdr es) body)]
                   [(const)         (emit-global e ctx #t)      (loop (cdr es) body)]

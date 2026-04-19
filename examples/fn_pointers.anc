@@ -1,0 +1,101 @@
+; fn_pointers.anc — function pointers
+; Shows: fn-ptr, call-ptr, fn-c, call-ptr-c, passing callbacks to C
+
+(include <stdio.h>)
+(include <stdlib.h>)
+(ffi printf (const char* ...) -> int)
+(ffi qsort  (void* size_t size_t void*) -> void)
+
+;; ---- 1. fn-ptr + call-ptr (Anchor-to-Anchor dispatch) ----------------------
+;;
+;; call-ptr works for regular fn functions only (AnchorVal ABI).
+
+(fn square (x)   (return (* x x)))
+(fn cube   (x)   (return (* x (* x x))))
+(fn negate (x)   (return (* x -1)))
+
+(fn apply (fp x)
+  (return (call-ptr fp x)))
+
+;; ---- 2. fn-c — C-native-signature callbacks --------------------------------
+;;
+;; fn-c emits a real C function with the declared signature.
+;; Parameters arrive as their C types and are wrapped as AnchorVals
+;; for the body; return is cast back to the C return type.
+
+(fn-c cmp-asc ((const void* a) (const void* b)) -> int
+  (let av (deref (cast intptr_t* a)))
+  (let bv (deref (cast intptr_t* b)))
+  (return (- av bv)))
+
+(fn-c cmp-desc ((const void* a) (const void* b)) -> int
+  (let av (deref (cast intptr_t* a)))
+  (let bv (deref (cast intptr_t* b)))
+  (return (- bv av)))
+
+(fn print-arr (arr n)
+  (let i 0)
+  (while (< i n)
+    (printf "%d " (cast int (array-get arr i)))
+    (set! i (+ i 1)))
+  (printf "\n"))
+
+;; ---- 3. call-ptr-c — calling a stored C-ABI pointer from Anchor ------------
+;;
+;; When the pointer comes from fn-c or ffi, use call-ptr-c with an explicit
+;; signature so the compiler emits the correct cast.
+
+(fn sort-with (arr n fp)
+  (qsort arr (cast size_t n) 8 fp))
+
+(with-arena
+  (fn main ()
+    ;; --- Part 1: Anchor function dispatch via call-ptr ---
+    (printf "=== call-ptr dispatch ===\n")
+    (let ops (alloc (* 3 8)))
+    (array-set! ops 0 (fn-ptr square))
+    (array-set! ops 1 (fn-ptr cube))
+    (array-set! ops 2 (fn-ptr negate))
+
+    (let names (alloc (* 3 8)))
+    (array-set! names 0 (embed-string "square"))
+    (array-set! names 1 (embed-string "cube"))
+    (array-set! names 2 (embed-string "negate"))
+
+    (let i 0)
+    (while (< i 3)
+      (let fp   (array-get ops   i))
+      (let name (array-get names i))
+      (let r (apply fp 4))
+      (printf "%s(4) = %d\n" (cast char* name) (cast int r))
+      (set! i (+ i 1)))
+
+    ;; --- Part 2: qsort via fn-c callbacks ---
+    (printf "\n=== qsort via fn-c ===\n")
+    (let arr (alloc (* 6 8)))
+    (array-set! arr 0 42)
+    (array-set! arr 1  7)
+    (array-set! arr 2 19)
+    (array-set! arr 3  3)
+    (array-set! arr 4 55)
+    (array-set! arr 5 12)
+
+    (sort-with arr 6 (fn-ptr cmp-asc))
+    (printf "ascending:  ") (print-arr arr 6)
+
+    (sort-with arr 6 (fn-ptr cmp-desc))
+    (printf "descending: ") (print-arr arr 6)
+
+    ;; --- Part 3: call-ptr-c — calling stored C-ABI pointer from Anchor ---
+    (printf "\n=== call-ptr-c ===\n")
+    (let cmp (fn-ptr cmp-asc))
+    (let x 10)
+    (let y 30)
+    (let r1 (call-ptr-c cmp ((const void* const void*) -> int) (ref x) (ref y)))
+    (printf "cmp(10, 30) = %d  (negative => 10 < 30)\n" (cast int r1))
+
+    (set! cmp (fn-ptr cmp-desc))
+    (let r2 (call-ptr-c cmp ((const void* const void*) -> int) (ref x) (ref y)))
+    (printf "cmp(10, 30) = %d  (positive => 10 > 30 in desc order)\n" (cast int r2))
+
+    (return 0)))

@@ -130,6 +130,62 @@ Use `(c-const NAME)` to pull in a C preprocessor constant at compile time:
 (c-const CLOCKS_PER_SEC)
 ```
 
+### `fn-c` — C-native-signature functions
+
+Use `fn-c` when you need a function with a specific C signature — for callbacks,
+`qsort` comparators, signal handlers, or any place the C ABI is fixed. Parameters
+are automatically wrapped as `AnchorVal` inside the body so Anchor expressions work
+normally; the return value is cast back to the declared C type.
+
+```anchor
+(include <stdlib.h>)
+
+(fn-c compare-ints ((const void* a) (const void* b)) -> int
+  (let av (deref (cast intptr_t* a)))
+  (let bv (deref (cast intptr_t* b)))
+  (return (- av bv)))
+
+; qsort needs a C comparator — fn-c is it
+(ffi qsort (void* size_t size_t void*) -> void)
+(qsort arr n 8 (fn-ptr compare-ints))
+```
+
+No separate `(ffi ...)` declaration is needed for the `fn-c` function itself — the
+compiler registers it in the extern table automatically.
+
+Each parameter is a space-separated list ending with the parameter name:
+`(const void* a)` → C type `const void*`, name `a`.
+
+### Function pointers
+
+`fn-ptr` takes the address of any named function (`fn`, `fn-c`, or `ffi`) and boxes
+it as an `AnchorVal`. The primary use is passing a callback pointer to a C function:
+
+```anchor
+; fn-c defines the callback; fn-ptr passes its address to C
+(ffi qsort (void* size_t size_t void*) -> void)
+(qsort arr n 8 (fn-ptr compare-ints))
+```
+
+`call-ptr` calls through a boxed pointer **for `fn` functions only** — it casts to
+the `AnchorVal(AnchorVal, ...)` calling convention that all `fn` functions use:
+
+```anchor
+(fn add (a b) (return (+ a b)))
+
+(let fp (fn-ptr add))          ; AnchorVal wrapping (void*)add
+(let result (call-ptr fp 3 4)) ; → 7
+```
+
+For `fn-c` or `ffi` function pointers, use `call-ptr-c` with an explicit signature:
+
+```anchor
+(let fp (fn-ptr compare-ints))
+(let result (call-ptr-c fp ((const void* const void*) -> int) (ref x) (ref y)))
+```
+
+The signature `((param-types...) -> ret-type)` matches the `ffi` declaration syntax.
+
 ### Memory and arenas
 
 `alloc` bumps the current arena pointer — O(1), no `malloc` overhead.
@@ -483,6 +539,7 @@ The `block` scope means any outer `it` is simply shadowed, not renamed.
 | `examples/global_arena.anc` | `global-arena`, `arena-reset!`, lists escaping function scope |
 | `examples/structs.anc` | Structs, nested structs, unions, enums, array-of-structs |
 | `examples/macros_showcase.anc` | Full macro spectrum: `syntax-rules` → `macro-case` → macros defining macros |
+| `examples/fn_pointers.anc` | `fn-ptr`, `call-ptr`, `fn-c`, `call-ptr-c`, passing callbacks to `qsort` |
 
 ---
 
