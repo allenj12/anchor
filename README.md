@@ -156,6 +156,16 @@ compiler registers it in the extern table automatically.
 Each parameter is a space-separated list ending with the parameter name:
 `(const void* a)` → C type `const void*`, name `a`.
 
+Because parameters are immediately re-boxed as `AnchorVal`, the declared C type is
+only visible at the call boundary — inside the body every parameter is an `AnchorVal`
+regardless of its declared type. To use a parameter as its original C type you must
+cast it explicitly:
+
+```anchor
+(fn-c greet ((const char* name)) -> void
+  (printf "Hello, %s\n" (cast char* name)))   ; cast needed — name is AnchorVal
+```
+
 ### Function pointers
 
 `fn-ptr` takes the address of any named function (`fn`, `fn-c`, or `ffi`) and boxes
@@ -242,22 +252,22 @@ Fields default to 8 bytes. Specify smaller sizes explicitly (e.g. 4 for `int`,
 ```anchor
 (struct Point (x 8) (y 8))
 
-(let p (alloc (sizeof-struct Point)))
+(let p (alloc (sizeof Point)))
 (field-set! Point p x 100)
 (field-set! Point p y 200)
 (let px (field-get Point p x))   ; → anchor_int(100)
 ```
 
-Nest structs inline using `(sizeof-struct Name)` as the field size. `field-get` on an
+Nest structs inline using `(sizeof Name)` as the field size. `field-get` on an
 embedded field returns a sub-struct pointer, not a scalar — use a second `field-get` to
 reach the inner value:
 
 ```anchor
 (struct AABB
-  (min (sizeof-struct Point))
-  (max (sizeof-struct Point)))
+  (min (sizeof Point))
+  (max (sizeof Point)))
 
-(let b (alloc (sizeof-struct AABB)))
+(let b (alloc (sizeof AABB)))
 (let mn (field-get AABB b min))   ; pointer into AABB at offset of 'min'
 (field-set! Point mn x 0)
 (field-set! Point mn y 0)
@@ -266,11 +276,11 @@ reach the inner value:
 (field-set! Point mx y 600)
 ```
 
-Array of structs — step by `sizeof-struct`:
+Array of structs — step by `sizeof`:
 
 ```anchor
-(let buf (alloc (* n (sizeof-struct Point))))
-(let stride (sizeof-struct Point))
+(let buf (alloc (* n (sizeof Point))))
+(let stride (sizeof Point))
 (let i 0)
 (while (< i n)
   (let p (+ buf (* i stride)))
@@ -287,7 +297,7 @@ All fields share offset 0. Total size is the largest field.
   (as-int   8)
   (as-float 8))
 
-(let u (alloc (sizeof-struct Num)))
+(let u (alloc (sizeof Num)))
 (field-set! Num u as-int 42)
 (field-get  Num u as-int)    ; 42
 (field-get  Num u as-float)  ; reinterpret same bits as double
@@ -326,6 +336,9 @@ Auto-incrementing (omit the value):
 
 `cons`, `car`, `cdr`, `nil`, and `null?` are built into the language.
 `cons` allocates a two-slot cell from the current arena.
+
+`nil` is `{NULL, 0}` — the same value serves as the empty list sentinel and as a
+null pointer. Pass it to any `ffi` function expecting a pointer; `null?` tests it.
 
 ```anchor
 (let lst (cons 1 (cons 2 (cons 3 nil))))
@@ -485,7 +498,7 @@ constructor, and accessor functions:
        `(do
           (struct ,name ,@(map list field size))
           (fn ,cname (,@pnames)
-            (let _ptr (alloc (sizeof-struct ,name)))
+            (let _ptr (alloc (sizeof ,name)))
             ,@(map (lambda (f p) `(field-set! ,sname _ptr ,f ,p)) field pnames)
             (return _ptr))
           ,@(map (lambda (aname f)

@@ -21,7 +21,7 @@
     cast alloc ref deref ptr-add array-get array-set!
     field-get field-set! sizeof-struct with-arena struct
     global global-set! extern-global const global-arena arena-reset!
-    break continue fn-ptr call-ptr call-ptr-c fn-c
+    sizeof break continue fn-ptr call-ptr call-ptr-c fn-c
     define-syntax syntax-rules macro-case syntax with-syntax quasisyntax unsyntax unsyntax-splicing quote quasiquote unquote unquote-splicing
     embed-bytes embed-string
     cons car cdr nil null?

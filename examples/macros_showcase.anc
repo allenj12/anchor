@@ -182,7 +182,7 @@
        `(do
           (struct ,name ,@(map list field size))
           (fn ,cname (,@pnames)
-            (let _ptr (alloc (sizeof-struct ,name)))
+            (let _ptr (alloc (sizeof ,name)))
             ,@(map (lambda (f p) `(field-set! ,sname _ptr ,f ,p)) field pnames)
             (return _ptr))
           ,@(map (lambda (aname f)

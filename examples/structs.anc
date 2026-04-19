@@ -1,5 +1,5 @@
 ; structs.anc — structs, nested structs, unions, enums
-; Shows: struct layout, sizeof-struct for nesting, union overlapping fields,
+; Shows: struct layout, sizeof for nesting, union overlapping fields,
 ;        enum constants, array-of-structs, field-get/field-set!
 
 (include <stdio.h>)
@@ -12,7 +12,7 @@
 (struct Point (x 8) (y 8))   ; 16 bytes total
 
 (fn make-point (px py)
-  (let p (alloc (sizeof-struct Point)))
+  (let p (alloc (sizeof Point)))
   (field-set! Point p x px)
   (field-set! Point p y py)
   (return p))
@@ -28,11 +28,11 @@
 ; ---------------------------------------------------------------------------
 
 (struct AABB
-  (min (sizeof-struct Point))   ; embeds Point inline at offset 0
-  (max (sizeof-struct Point)))  ; embeds Point inline at offset 16
+  (min (sizeof Point))   ; embeds Point inline at offset 0
+  (max (sizeof Point)))  ; embeds Point inline at offset 16
 
 (fn make-aabb (x0 y0 x1 y1)
-  (let b (alloc (sizeof-struct AABB)))
+  (let b (alloc (sizeof AABB)))
   (let mn (field-get AABB b min))   ; pointer-to-sub-struct
   (let mx (field-get AABB b max))
   (field-set! Point mn x x0)
@@ -61,7 +61,7 @@
 
 ; store an integer, reinterpret as float (type-punning)
 (fn int-bits-as-float (n)
-  (let u (alloc (sizeof-struct Num)))
+  (let u (alloc (sizeof Num)))
   (field-set! Num u as-int n)
   (return (field-get Num u as-float)))
 
@@ -85,11 +85,11 @@
     (printf "West\n")))))
 
 ; ---------------------------------------------------------------------------
-; Array of structs — N points, stride = sizeof-struct Point
+; Array of structs — N points, stride = sizeof Point
 ; ---------------------------------------------------------------------------
 
 (fn print-points (buf n)
-  (let stride (sizeof-struct Point))
+  (let stride (sizeof Point))
   (let i 0)
   (while (< i n)
     (let p (+ buf (* i stride)))
@@ -132,8 +132,8 @@
 
     ; array of structs
     (let n 4)
-    (let pts (alloc (* n (sizeof-struct Point))))
-    (let stride (sizeof-struct Point))
+    (let pts (alloc (* n (sizeof Point))))
+    (let stride (sizeof Point))
     (let i 0)
     (while (< i n)
       (let p (+ pts (* i stride)))

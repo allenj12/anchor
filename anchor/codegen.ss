@@ -472,13 +472,18 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a) {
           (unless (fx= (length args) 1) (anchor-error "alloc: (alloc SIZE)"))
           (string-append "anchor_alloc(" (emit-size-expr (car args) ctx) ")")]
 
-         ;; sizeof-struct / sizeof-enum
-         [(eq? h 'sizeof-struct)
-          (unless (and (fx= (length args) 1) (symbol? (car args)))
-            (anchor-error "sizeof-struct: (sizeof-struct Name)"))
-          (if (hashtable-ref (ctx-enums ctx) (car args) #f)
-              "anchor_int(4)"
-              (string-append "anchor_int(ANCHOR_SIZEOF_" (c-ident (car args)) ")"))]
+         ;; sizeof — unified: Anchor struct/enum or C type
+         [(or (eq? h 'sizeof) (eq? h 'sizeof-struct))
+          (unless (fx= (length args) 1)
+            (anchor-error "sizeof: (sizeof Name)"))
+          (let ([arg (car args)])
+            (cond
+              [(hashtable-ref (ctx-enums ctx) (id-sym arg) #f)
+               "anchor_int(4)"]
+              [(hashtable-ref (ctx-structs ctx) (id-sym arg) #f)
+               (string-append "anchor_int(ANCHOR_SIZEOF_" (c-ident arg) ")")]
+              [else
+               (string-append "anchor_int((intptr_t)sizeof(" (cast-type-str arg) "))")]))]
 
          ;; field-get
          [(eq? h 'field-get)
@@ -680,8 +685,15 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a) {
 (define (emit-size-expr node ctx)
   (cond
     [(and (number? node) (exact? node)) (number->string node)]
-    [(and (pair? node) (eq? (car node) 'sizeof-struct))
-     (string-append "ANCHOR_SIZEOF_" (c-ident (cadr node)))]
+    [(and (pair? node) (memv (car node) '(sizeof sizeof-struct)))
+     (let ([arg (cadr node)])
+       (cond
+         [(hashtable-ref (ctx-structs ctx) (id-sym arg) #f)
+          (string-append "ANCHOR_SIZEOF_" (c-ident arg))]
+         [(hashtable-ref (ctx-enums ctx) (id-sym arg) #f)
+          "4"]
+         [else
+          (string-append "sizeof(" (cast-type-str arg) ")")]))]
     [(symbol? node) (string-append "(size_t)_ANCH_IVAL(" (c-ident node) ")")]
     [else
      (let ([pre (make-pre)])
@@ -1100,9 +1112,9 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a) {
   ;;   omitted           → default field size, not embedded
   (cond
     [(number? form) (cons (exact form) #f)]
-    [(and (pair? form) (eq? (car form) 'sizeof-struct))
+    [(and (pair? form) (memv (car form) '(sizeof sizeof-struct)))
      (unless (and (pair? (cdr form)) (symbol? (cadr form)))
-       (anchor-error "sizeof-struct in struct field: expected (sizeof-struct Name)"))
+       (anchor-error "sizeof in struct field: expected (sizeof Name)"))
      (let ([n (cadr form)])
        ;; Only embed if it's a struct/union — enums are scalar (no view)
        (cons (struct-total-size ctx n)
@@ -1292,8 +1304,11 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a) {
        (let* ([sz   (if (number? first) (exact first) 0)]
               [body (if (number? first) (cdr items) items)])
          (when (null? body) (anchor-error "with-arena: empty body"))
-         (if (for-all (lambda (f) (and (pair? f) (eq? (car f) 'fn))) body)
-             (for-each (lambda (f) (emit-fn f ctx sz)) body)
+         (if (for-all (lambda (f) (and (pair? f) (memv (car f) '(fn fn-c)))) body)
+             (for-each (lambda (f)
+                         (if (eq? (car f) 'fn-c)
+                             (emit-fn-c f ctx sz)
+                             (emit-fn f ctx sz))) body)
              (let* ([cap      (if (fx> sz 0) (number->string sz) "ANCHOR_DEFAULT_ARENA_CAP")]
                     [av       (string-append "_anc_arena_" (ctx-tmp! ctx))]
                     [use-heap (fx> sz 1048576)])
@@ -1357,13 +1372,14 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a) {
        (anchor-error (if const? "const: initializer must be a number"
                                 "global: initializer must be number or (alloc N)"))])))
 
-(define (emit-fn-c node ctx)
+(define (emit-fn-c node ctx . rest-args)
   ;; (fn-c name ((type... pname) ...) -> ret-type  body ...)
   ;; Emits a C-native-signature function.  Parameters are wrapped as AnchorVals
   ;; inside the body so normal Anchor expressions work.  The return statement
   ;; casts back to the declared C return type.
   ;; The function is also registered in the externs table so Anchor call sites
   ;; get the correct FFI casting without a separate ffi declaration.
+  (let ([arena-sz (and (pair? rest-args) (car rest-args))])
   (unless (fx>= (length node) 4)
     (anchor-error "fn-c: (fn-c name ((type... pname) ...) -> ret-type body...)"))
   (let* ([name      (cadr node)]
@@ -1409,13 +1425,30 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a) {
                                                   " = anchor_int((intptr_t)" raw ");"))])
                   (ctx-emit! ctx wrap)))
               parsed)
+    ;; Optional arena setup (when wrapped in with-arena)
+    (when arena-sz
+      (let* ([cap (if (and (number? arena-sz) (fx> arena-sz 0))
+                      (number->string arena-sz)
+                      "ANCHOR_DEFAULT_ARENA_CAP")]
+             [use-heap (and (number? arena-sz) (fx> arena-sz 1048576))]
+             [av "_anc_arena"])
+        (if use-heap
+            (ctx-emit! ctx (string-append "char* " av "_buf = (char*)__builtin_malloc(" cap ");"))
+            (ctx-emit! ctx (string-append "char " av "_buf[" cap "];")))
+        (ctx-emit! ctx (string-append "AnchorArena " av " = {(char*)" av "_buf, " cap ", 0, _anchor_arena_top};"))
+        (ctx-emit! ctx (string-append "_anchor_arena_top = &" av ";"))
+        (ctx-push-arena! ctx av #f)
+        (ctx-arena-depth-set! ctx (fx+ (ctx-arena-depth ctx) 1))))
     ;; Emit body; ctx-fn-ret set so return emits the right C cast
     (let ([prev-ret (ctx-fn-ret ctx)])
       (ctx-fn-ret-set! ctx ret-str)
       (for-each (lambda (s) (emit-stmt s ctx)) body)
       (ctx-fn-ret-set! ctx prev-ret))
+    (when arena-sz
+      (ctx-pop-arena! ctx)
+      (ctx-arena-depth-set! ctx (fx- (ctx-arena-depth ctx) 1)))
     (ctx-dedent! ctx)
-    (ctx-emit! ctx "}")))
+    (ctx-emit! ctx "}"))))
 
 ;; ---------------------------------------------------------------------------
 ;; Entry point
