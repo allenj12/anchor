@@ -514,8 +514,7 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a) {
           (when (fx< (length args) 2) (anchor-error "array-get: (array-get arr i [esz])"))
           (let* ([arr (emit-expr (car args) ctx pre)]
                  [idx (emit-expr (cadr args) ctx pre)]
-                 [esz (if (and (fx>= (length args) 3) (number? (caddr args)))
-                          (exact (caddr args)) 8)]
+                 [esz (resolve-esz (and (fx>= (length args) 3) (caddr args)) ctx)]
                  [tmp (ctx-tmp! ctx)])
             (if (fx<= esz 8)
                 (begin
@@ -533,8 +532,7 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a) {
           (let* ([arr (emit-expr (car args) ctx pre)]
                  [idx (emit-expr (cadr args) ctx pre)]
                  [val (emit-expr (caddr args) ctx pre)]
-                 [esz (if (and (fx>= (length args) 4) (number? (cadddr args)))
-                          (exact (cadddr args)) 8)])
+                 [esz (resolve-esz (and (fx>= (length args) 4) (cadddr args)) ctx)])
             (if (fx<= esz 8)
                 (let ([tmp (ctx-tmp! ctx)])
                   (pre-add! pre (string-append "intptr_t " tmp "_ival = _ANCH_IVAL(" val ");"))
@@ -681,6 +679,20 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a) {
          [else (anchor-error "cannot emit expression" node)]))]
 
     [else (anchor-error "cannot emit expression" node)]))
+
+(define (resolve-esz arg ctx)
+  ;; Resolve array element size from optional arg:
+  ;;   literal number       → that number
+  ;;   (sizeof Name)        → looked up from structs/enums table
+  ;;   absent               → 8 (default AnchorVal slot size)
+  (cond
+    [(not arg) 8]
+    [(and (number? arg) (exact? arg)) (exact arg)]
+    [(and (pair? arg) (memv (car arg) '(sizeof sizeof-struct)))
+     (let ([n (id-sym (cadr arg))])
+       (or (struct-total-size ctx n)
+           (anchor-error "sizeof: unknown struct" n)))]
+    [else (anchor-error "array-get/set!: element size must be a literal or (sizeof Name)")]))
 
 (define (emit-size-expr node ctx)
   (cond
@@ -920,14 +932,13 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a) {
                   [arr (emit-expr (car args) ctx pre)]
                   [idx (emit-expr (cadr args) ctx pre)]
                   [val (emit-expr (caddr args) ctx pre)]
-                  [esz (if (and (fx>= (length args) 4) (number? (cadddr args)))
-                           (exact (cadddr args)) 8)])
+                  [esz (resolve-esz (and (fx>= (length args) 4) (cadddr args)) ctx)])
              (pre-emit! pre ctx)
              (if (fx<= esz 8)
                  (let ([tmp (ctx-tmp! ctx)])
                    (ctx-emit! ctx (string-append "intptr_t " tmp "_ival = _ANCH_IVAL(" val ");"))
                    (ctx-emit! ctx (string-append "__builtin_memcpy((char*)" arr ".ptr + _ANCH_IVAL(" idx ") * " (number->string esz) ", &" tmp "_ival, " (number->string esz) ");")))
-                 (ctx-emit! ctx (string-append "__builtin_memcpy((char*)" arr ".ptr + _ANCH_IVAL(" idx ") * " (number->string esz) ", " val ".ptr, " (number->string esz) ";"))))]
+                 (ctx-emit! ctx (string-append "__builtin_memcpy((char*)" arr ".ptr + _ANCH_IVAL(" idx ") * " (number->string esz) ", " val ".ptr, " (number->string esz) ");"))))]
 
           ;; field-set! as statement
           [(eq? h 'field-set!)
