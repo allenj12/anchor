@@ -1,6 +1,7 @@
 ; fizzbuzz.anc — FizzBuzz 1..30
 ; Shows: functions, while loops, conditionals, modulo, FFI
 
+(include <stdio.h>)
 (ffi printf (const char* ...) -> int)
 
 (fn divisible? (n d)

@@ -6,7 +6,7 @@ Every value is an `AnchorVal` fat pointer `{void* ptr, size_t size}`. Scalars li
 unboxed in the `ptr` field. Memory is managed through arenas — bump-pointer regions
 that free all at once when the function returns. There is no GC.
 
-The macro system is hygienic `syntax-rules` plus `syntax-case`, which runs arbitrary
+The macro system is hygienic `syntax-rules` plus `macro-case`, which runs arbitrary
 Chez Scheme at expand time. This lets macros compute sizes, unroll loops, generate
 families of functions, and define other macros — all before a line of C is emitted.
 
@@ -61,13 +61,19 @@ everything is freed on return. The default size is 64 MB.
 (while (< x 100)
   (set! x (* x 2)))
 
+(while #t
+  (if (== x 0) (break))
+  (if (== (% x 2) 0) (do (set! x (- x 1)) (continue)))
+  (set! x (- x 1)))
+
 (block              ; introduces a C scope — variables declared here are local to it
   (let tmp x)
   (set! x 0))
 ```
 
 `do` sequences expressions and returns the last one; `block` does the same but wraps
-in `{ }` so `let` bindings inside don't escape.
+in `{ }` so `let` bindings inside don't escape. `break` and `continue` work exactly
+as in C — they apply to the innermost enclosing `while`.
 
 ### Functions
 
@@ -284,11 +290,16 @@ Hygienic: names introduced in a template (like `_tmp`) are automatically gensymm
 so they never clash with variables at the call site.
 
 ```anchor
-; when: if without else
+; when / unless — one-armed conditionals
 (define-syntax when
   (syntax-rules ()
     [(_ cond body ...)
-     (if cond (do body ...) (do))]))
+     (if cond (do body ...))]))
+
+(define-syntax unless
+  (syntax-rules ()
+    [(_ cond body ...)
+     (if (! cond) (do body ...))]))
 
 ; for loop — block scopes the variable, so it doesn't leak after the loop
 (define-syntax for
@@ -326,7 +337,7 @@ Literal keyword in pattern — `else` is matched exactly, not as a pattern varia
     [(_ (test body ...) clause ...)  (if test (do body ...) (my-cond clause ...))]))
 ```
 
-### `syntax-case` — with expansion-time computation
+### `macro-case` — with expansion-time computation
 
 Templates are plain Chez Scheme code. Pattern variables bind to the matched Anchor
 AST values. This lets you run arbitrary computation — `length`, `map`, `iota`, string
@@ -336,7 +347,7 @@ manipulation — before emitting a single line of C.
 
 ```anchor
 (define-syntax arena-array
-  (syntax-case ()
+  (macro-case ()
     [(_ name val ...)
      (let* ([n    (length val)]
             [size (* n 8)])
@@ -357,7 +368,7 @@ manipulation — before emitting a single line of C.
 
 ```anchor
 (define-syntax unroll
-  (syntax-case ()
+  (macro-case ()
     [(_ n body ...)
      (number? n)
      `(do ,@(apply append (map (lambda (_) body) (iota n))))]))
@@ -369,13 +380,13 @@ manipulation — before emitting a single line of C.
 ### Macros that define macros
 
 `syntax-rules` cannot write macros whose inner templates contain `...` because the
-outer instantiator would try to expand them. `syntax-case` with quasiquote treats
+outer instantiator would try to expand them. `macro-case` with quasiquote treats
 the inner template as plain data — `r`, `...`, `x` are just symbols being consed
 into a list:
 
 ```anchor
 (define-syntax define-fold-op
-  (syntax-case ()
+  (macro-case ()
     [(_ name op identity)
      `(define-syntax ,name
         (syntax-rules ()
@@ -398,7 +409,7 @@ constructor, and accessor functions:
 
 ```anchor
 (define-syntax define-struct
-  (syntax-case ()
+  (macro-case ()
     [(_ name (field size) ...)
      (let* ([sname  (id-sym name)]
             [cname  (string->symbol (string-append "make-" (symbol->string sname)))]
@@ -423,6 +434,31 @@ constructor, and accessor functions:
 ;   (fn Vec2-y (s) ...)
 ```
 
+### Anaphoric macros — intentional capture with `datum->syntax`
+
+By default macros are hygienic: names introduced in a template never clash with
+names at the call site.  For deliberately anaphoric macros (e.g. `aif`, which
+binds `it` for the user to reference), use `datum->syntax` to place a name in the
+call-site scope.  `_kw` is always bound in `macro-case` clause bodies — it is the
+macro keyword with use-site marks, the standard context argument:
+
+```anchor
+(define-syntax aif
+  (macro-case ()
+    [(_ test then else-clause)
+     (let ([it-id (datum->syntax _kw 'it)])
+       #`(block
+           (let #,it-id #,test)
+           (if #,it-id #,then #,else-clause)))]))
+
+(aif (find-item key table)
+  (printf "found: %d\n" (cast int it))
+  (printf "not found\n"))
+```
+
+`it` inside `then` refers to the macro-introduced binding, not any outer `it`.
+The `block` scope means any outer `it` is simply shadowed, not renamed.
+
 ---
 
 ## Examples
@@ -435,7 +471,7 @@ constructor, and accessor functions:
 | `examples/linked_list.anc` | `cons`/`car`/`cdr`/`nil`/`null?`, list operations |
 | `examples/global_arena.anc` | `global-arena`, `arena-reset!`, lists escaping function scope |
 | `examples/structs.anc` | Structs, nested structs, unions, enums, array-of-structs |
-| `examples/macros_showcase.anc` | Full macro spectrum: `syntax-rules` → `syntax-case` → macros defining macros |
+| `examples/macros_showcase.anc` | Full macro spectrum: `syntax-rules` → `macro-case` → macros defining macros |
 
 ---
 

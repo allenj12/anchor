@@ -41,6 +41,31 @@
                     (char=? (string-ref src (fx+ i 1)) #\@))
                (set! tokens (cons ",@" tokens))
                (loop (fx+ i 2))]
+              ;; #,@ must come before #, and #'
+              [(and (char=? c #\#)
+                    (fx< (fx+ i 2) len)
+                    (char=? (string-ref src (fx+ i 1)) #\,)
+                    (char=? (string-ref src (fx+ i 2)) #\@))
+               (set! tokens (cons "#,@" tokens))
+               (loop (fx+ i 3))]
+              ;; #, unsyntax: #,x → (unsyntax x)
+              [(and (char=? c #\#)
+                    (fx< (fx+ i 1) len)
+                    (char=? (string-ref src (fx+ i 1)) #\,))
+               (set! tokens (cons "#," tokens))
+               (loop (fx+ i 2))]
+              ;; #' syntax shorthand: #'x → (syntax x)
+              [(and (char=? c #\#)
+                    (fx< (fx+ i 1) len)
+                    (char=? (string-ref src (fx+ i 1)) #\'))
+               (set! tokens (cons "#'" tokens))
+               (loop (fx+ i 2))]
+              ;; #` quasisyntax: #`x → (quasisyntax x)
+              [(and (char=? c #\#)
+                    (fx< (fx+ i 1) len)
+                    (char=? (string-ref src (fx+ i 1)) #\`))
+               (set! tokens (cons "#`" tokens))
+               (loop (fx+ i 2))]
               ;; Single-char tokens: ( ) [ ] ` ' ,
               [(memv c '(#\( #\) #\[ #\] #\` #\' #\,))
                (set! tokens (cons (string c) tokens))
@@ -117,7 +142,11 @@
   '(("'"  . quote)
     ("`"  . quasiquote)
     (","  . unquote)
-    (",@" . unquote-splicing)))
+    (",@" . unquote-splicing)
+    ("#'" . syntax)
+    ("#`" . quasisyntax)
+    ("#," . unsyntax)
+    ("#,@" . unsyntax-splicing)))
 
 (define (anchor-parse src)
   (let* ([tokens (anchor-tokenize src)]

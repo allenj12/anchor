@@ -1,12 +1,12 @@
-; macros_showcase.anc — showcase of syntax-rules and syntax-case macros
+; macros_showcase.anc — showcase of syntax-rules and macro-case macros
 ;
 ; Demonstrates:
 ;   1. Simple syntax-rules: unless, when
 ;   2. Hygiene: swap! (tmp variable cannot capture user bindings)
 ;   3. Recursive syntax-rules: my-and, my-or, my-cond
 ;   4. syntax-rules with literals: for (to keyword)
-;   5. syntax-case with expansion-time computation: arena-array
-;   6. syntax-case with guard: unroll (requires literal integer)
+;   5. macro-case with expansion-time computation: arena-array
+;   6. macro-case with guard: unroll (requires literal integer)
 
 (include <stdio.h>)
 
@@ -20,13 +20,13 @@
 (define-syntax when
   (syntax-rules ()
     [(_ cond body ...)
-     (if cond (do body ...) (do))]))
+     (if cond (do body ...))]))
 
 ; unless: inverse when
 (define-syntax unless
   (syntax-rules ()
     [(_ cond body ...)
-     (if cond (do) (do body ...))]))
+     (if (! cond) (do body ...))]))
 
 ; ---------------------------------------------------------------------------
 ; 2. Hygiene: swap! introduces a temporary variable
@@ -93,7 +93,7 @@
          (set! var (+ var 1))))]))
 
 ; ---------------------------------------------------------------------------
-; 5. syntax-case: arena-array
+; 5. macro-case: arena-array
 ;
 ;    (arena-array name v0 v1 ... vN)
 ;
@@ -106,7 +106,7 @@
 ; ---------------------------------------------------------------------------
 
 (define-syntax arena-array
-  (syntax-case ()
+  (macro-case ()
     [(_ name val ...)
      (let* ([n    (length val)]
             [size (* n 8)])
@@ -149,7 +149,7 @@
     [(_ x lo hi) (max2 (min2 x hi) lo)]))
 
 ; ---------------------------------------------------------------------------
-; 7. syntax-case that generates multiple definitions: define-struct
+; 7. macro-case that generates multiple definitions: define-struct
 ;
 ;    (define-struct Name (field size) ...)
 ;
@@ -162,11 +162,11 @@
 ;    top-level forms, so the codegen sees each definition independently.
 ;    All generated names (make-Name, Name-field, p_field) are built from
 ;    the user-supplied 'name' and 'field' symbols at expansion time —
-;    this is the key thing syntax-case enables that syntax-rules cannot do.
+;    this is the key thing macro-case enables that syntax-rules cannot do.
 ; ---------------------------------------------------------------------------
 
 (define-syntax define-struct
-  (syntax-case ()
+  (macro-case ()
     [(_ name (field size) ...)
      (let* ([sname  (id-sym name)]
             [cname  (string->symbol
@@ -190,7 +190,7 @@
                  anames field)))]))
 
 ; ---------------------------------------------------------------------------
-; 6. syntax-case with guard: unroll
+; 6. macro-case with guard: unroll
 ;
 ;    (unroll N body ...)
 ;
@@ -200,7 +200,7 @@
 ; ---------------------------------------------------------------------------
 
 (define-syntax unroll
-  (syntax-case ()
+  (macro-case ()
     [(_ n body ...)
      (number? n)
      `(do ,@(apply append (map (lambda (_) body) (iota n))))]))
@@ -230,20 +230,23 @@
 ; syntax-rules cannot be used here.  The outer template contains 'r ...' which
 ; the outer instantiator would try to expand as an ellipsis substitution —
 ; but 'r' is not a pattern variable of the outer macro.
-; syntax-case with quasiquote treats the inner template as plain data: 'r'
+; macro-case with quasiquote treats the inner template as plain data: 'r'
 ; and '...' are just symbols being cons'd into a list, never evaluated as
 ; ellipsis by the outer transformer.
-(define-syntax define-fold-op
-  (syntax-case ()
-    [(_ name op identity)
-     `(define-syntax ,name
-        (syntax-rules ()
-          [(_)         ,identity]
-          [(_ x)       x]
-          [(_ x r ...) (,op x (,name r ...))]))]))
+(define-syntax define-fold-ops
+    (macro-case ()
+      [(_ (name op identity) ...)
+       #'(do
+           (define-syntax name
+             (syntax-rules ()
+               [(_)         identity]
+               [(_ x)       x]
+               [(_ x r ...) (op x (name r ...))]))
+           ...)]))
 
-(define-fold-op my-add + 0)
-(define-fold-op my-mul * 1)
+(define-fold-ops
+    (my-add + 0)
+    (my-mul * 1))
 
 ; ---------------------------------------------------------------------------
 ; Use define-struct: emits struct + constructor + accessors as top-level forms.

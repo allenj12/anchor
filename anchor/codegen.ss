@@ -844,6 +844,10 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a) {
              (ctx-dedent! ctx)
              (ctx-emit! ctx "}"))]
 
+          ;; break / continue
+          [(eq? h 'break)    (ctx-emit! ctx "break;")]
+          [(eq? h 'continue) (ctx-emit! ctx "continue;")]
+
           ;; do
           [(eq? h 'do)
            (for-each (lambda (s) (emit-stmt s ctx)) args)]

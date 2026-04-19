@@ -21,7 +21,8 @@
     cast alloc ref deref ptr-add array-get array-set!
     field-get field-set! sizeof-struct with-arena struct
     global global-set! extern-global const global-arena arena-reset!
-    define-syntax syntax-rules syntax-case quote quasiquote unquote unquote-splicing
+    break continue
+    define-syntax syntax-rules macro-case syntax with-syntax quasisyntax unsyntax unsyntax-splicing quote quasiquote unquote unquote-splicing
     embed-bytes embed-string
     cons car cdr nil null?
     unpacked-struct union enum
@@ -89,6 +90,19 @@
                       literals bindings))]
     [else #f]))
 
+;; Minimum number of form elements required by pattern positions [start..plen).
+;; Ellipsis groups (pat ...) count as 0 minimum; fixed patterns count as 1.
+(define (min-forms pv start)
+  (let loop ([i start] [count 0])
+    (if (fx>= i (vector-length pv))
+        count
+        (if (eq? (vector-ref pv i) '...)
+            (loop (fx+ i 1) count)
+            (if (and (fx< (fx+ i 1) (vector-length pv))
+                     (eq? (vector-ref pv (fx+ i 1)) '...))
+                (loop (fx+ i 2) count)
+                (loop (fx+ i 1) (fx+ count 1)))))))
+
 (define (match-list pv fv literals bindings)
   (let ([plen (vector-length pv)]
         [flen (vector-length fv)])
@@ -100,10 +114,12 @@
          (let ([pat (vector-ref pv pi)])
            (if (and (fx< (fx+ pi 1) plen)
                     (eq? (vector-ref pv (fx+ pi 1)) '...))
-               ;; Ellipsis pattern
-               (let* ([fixed-after (fx- plen (fx+ pi 2))]
-                      [available   (fx- flen (fx+ fi fixed-after))])
-                 (if (fx< available 0)
+               ;; Ellipsis pattern: greedily match as many consecutive elements as
+               ;; possible, up to the maximum that leaves enough for remaining patterns.
+               ;; Stops on the first element that doesn't match pat.
+               (let* ([min-after  (min-forms pv (fx+ pi 2))]
+                      [max-avail  (fx- (fx- flen fi) min-after)])
+                 (if (fx< max-avail 0)
                      #f
                      (let* ([evars (pattern-vars pat literals)]
                             [b2    (fold-right
@@ -111,20 +127,23 @@
                                        (if (assq v acc) acc (cons (cons v '()) acc)))
                                      b evars)])
                        (let cap ([k 0] [b3 b2])
-                         (if (fx= k available)
-                             (loop (fx+ pi 2) (fx+ fi available) b3)
+                         (if (or (fx= k max-avail)
+                                 (fx>= (fx+ fi k) flen))
+                             (loop (fx+ pi 2) (fx+ fi k) b3)
                              (let ([sub (match-pattern pat (vector-ref fv (fx+ fi k))
                                                        literals '())])
-                               (and sub
-                                    (cap (fx+ k 1)
-                                         (map (lambda (entry)
-                                                (if (memv (car entry) evars)
-                                                    (let ([cur (assq (car entry) b3)])
-                                                      (cons (car entry)
-                                                            (append (cdr cur)
-                                                                    (list (cdr (assq (car entry) sub))))))
-                                                    entry))
-                                              b3)))))))))
+                               (if sub
+                                   (cap (fx+ k 1)
+                                        (map (lambda (entry)
+                                               (if (memv (car entry) evars)
+                                                   (let ([cur (assq (car entry) b3)])
+                                                     (cons (car entry)
+                                                           (append (cdr cur)
+                                                                   (list (cdr (assq (car entry) sub))))))
+                                                   entry))
+                                             b3))
+                                   ;; element doesn't match pat — stop greedy here
+                                   (loop (fx+ pi 2) (fx+ fi k) b3))))))))
                ;; Normal pattern item
                (and (fx< fi flen)
                     (let ([b2 (match-pattern pat (vector-ref fv fi) literals b)])
@@ -134,11 +153,20 @@
 ;; Template instantiation
 ;; ---------------------------------------------------------------------------
 
+(define (ellipsis-escape? template)
+  ;; (... subtemplate) — one-argument escape form
+  (and (pair? template)
+       (eq? (car template) '...)
+       (pair? (cdr template))
+       (null? (cddr template))))
+
 (define (ellipsis-vars-in template evars)
   ;; Which evars actually appear in template?
+  ;; Don't look inside (... subtemplate) — ellipsis is escaped there.
   (cond
     [(symbol? template)
      (if (memv template evars) (list template) '())]
+    [(ellipsis-escape? template) '()]
     [(pair? template)
      (append (ellipsis-vars-in (car template) evars)
              (ellipsis-vars-in (cdr template) evars))]
@@ -151,9 +179,36 @@
        (if (and b (not (memv template evars)))
            (cdr b)
            template))]
+    [(ellipsis-escape? template)
+     ;; (... subtemplate) — process subtemplate with ... as literal
+     (instantiate-escaped (cadr template) bindings evars)]
     [(pair? template)
      (instantiate-list template bindings evars)]
     [else template]))
+
+;; Instantiate with ... treated as a literal symbol.
+;; (... subtemplate) inside escaped context pops back to normal mode.
+(define (instantiate-escaped template bindings evars)
+  (cond
+    [(eq? template '...) '...]
+    [(symbol? template)
+     (let ([b (assq template bindings)])
+       (if (and b (not (memv template evars)))
+           (cdr b)
+           template))]
+    [(ellipsis-escape? template)
+     ;; nested (... subtemplate) — pop back to normal instantiation
+     (instantiate (cadr template) bindings evars)]
+    [(pair? template)
+     (instantiate-list-escaped template bindings evars)]
+    [else template]))
+
+(define (instantiate-list-escaped items bindings evars)
+  (let loop ([rest items] [result '()])
+    (if (null? rest)
+        (reverse result)
+        (loop (cdr rest)
+              (cons (instantiate-escaped (car rest) bindings evars) result)))))
 
 (define (instantiate-list items bindings evars)
   (let loop ([rest items] [result '()])
@@ -163,16 +218,17 @@
       [(and (pair? (cdr rest)) (eq? (cadr rest) '...))
        (let* ([item    (car rest)]
               [used-ev (ellipsis-vars-in item evars)])
-         (when (null? used-ev)
-           (anchor-error "ellipsis in template but no ellipsis variable in subtemplate"))
+         (if (null? used-ev)
+             ;; No ellipsis vars — pass through literally (supports nested templates
+             ;; where the inner ... belongs to an inner pattern, not the outer one).
+             (loop (cddr rest)
+                   (cons '... (cons (instantiate item bindings evars) result)))
          (let* ([evar  (car used-ev)]
                 [count (length (cdr (assq evar bindings)))])
            (for-each (lambda (v)
                        (unless (fx= (length (cdr (assq v bindings))) count)
                          (anchor-error "mismatched ellipsis lengths")))
                      used-ev)
-           ;; Expand k items in order, consing onto result (reversed accumulator).
-           ;; The outer loop's final (reverse result) will put them in order.
            (let expand ([k 0] [r result])
              (if (fx= k count)
                  (loop (cddr rest) r)
@@ -182,11 +238,8 @@
                                            e))
                                      bindings)]
                         [sub-ev (filter (lambda (v) (not (memv v used-ev))) evars)]
-                        ;; Insert at front of r; items will be reversed at end.
-                        ;; To preserve forward order, we need to add the LAST item first.
-                        ;; So we recurse k=0..count-1 but build reversed, then reverse once.
                         [expanded (instantiate item sub-b sub-ev)])
-                   (expand (fx+ k 1) (cons expanded r)))))))]
+                   (expand (fx+ k 1) (cons expanded r))))))))]
       [else
        (loop (cdr rest)
              (cons (instantiate (car rest) bindings evars) result))])))
@@ -270,78 +323,157 @@
 ;; ,@var splices a list (for ellipsis captures).  The result is an Anchor AST.
 ;; ---------------------------------------------------------------------------
 
+
 ;; ---------------------------------------------------------------------------
-;; Automatic hygiene for syntax-case templates
+;; Quasisyntax support — #`template with #,expr and #,@expr escapes
 ;;
-;; Scans the template expression for symbols in quoted (quasiquote) position
-;; that are not pattern variables, literals, or special forms.  These are
-;; macro-introduced names that could capture user variables; we pre-substitute
-;; fresh gensyms before the template is eval'd.
+;; Strategy: walk the template ONCE before quoting it, replacing each
+;; (unsyntax expr) / (unsyntax-splicing expr) with (unsyntax <gensym>) /
+;; (unsyntax-splicing <gensym>).  The gensym→expr pairs are collected.
 ;;
-;; Only quasiquote-based templates are analyzed — inside (unquote …) / (unquote-splicing …)
-;; the expression is runtime Chez code and is not scanned.
+;; The generated Chez code evaluates all escape exprs first (in the scope
+;; where pattern variables are bound as Chez let vars), binds the results
+;; to the gensyms, then passes everything to instantiate-quasi which treats
+;; (unsyntax gs) as a lookup in the holes alist.
 ;; ---------------------------------------------------------------------------
 
-;; Find macro-introduced names: symbols in BINDING positions (let NAME, fn NAME,
-;; fn params) within quasiquoted regions that are not pattern variables, literals,
-;; special forms, or wildcards.  We deliberately exclude call-position symbols
-;; (like printf, malloc) so external references are never renamed.
-;; subst-quasi-syms then replaces ALL occurrences (both binding and call sites)
-;; of these names, preserving internal consistency.
-(define (template-sc-introduced template pvars literals)
-  (define (introduced? sym)
-    (and (symbol? sym)
-         (not (memv sym pvars))
-         (not (memv sym literals))
-         (not (memv sym *special-forms*))
-         (not (eq? sym '_))
-         (not (eq? sym '...))))
-  (define (scan-quasi expr)
-    (cond
-      [(not (pair? expr)) '()]
-      [(or (eq? (car expr) 'unquote)
-           (eq? (car expr) 'unquote-splicing))
-       '()]
-      [(eq? (car expr) 'let)
-       ;; (let NAME val)
-       (let ([nm (and (pair? (cdr expr)) (cadr expr))])
-         (append (if (introduced? nm) (list nm) '())
-                 (scan-quasi (cddr expr))))]
-      [(eq? (car expr) 'fn)
-       ;; (fn NAME (PARAMS...) body...)
-       (let* ([nm     (and (pair? (cdr expr)) (cadr expr))]
-              [params (and (pair? (cddr expr)) (list? (caddr expr)) (caddr expr))])
-         (append (if (introduced? nm) (list nm) '())
-                 (filter introduced? (or params '()))
-                 (scan-quasi (cdddr expr))))]
-      [else
-       (append (scan-quasi (car expr))
-               (scan-quasi (cdr expr)))]))
-  (define (scan expr)
-    (cond
-      [(not (pair? expr)) '()]
-      [(eq? (car expr) 'quasiquote) (scan-quasi (cadr expr))]
-      [else (append (scan (car expr)) (scan (cdr expr)))]))
-  (delete-duplicates (scan template)))
+(define (extract-unsyntax tmpl)
+  ;; Returns (tmpl2 . ((gs . expr) ...))
+  ;; tmpl2 is tmpl with all (unsyntax E)/(unsyntax-splicing E) replaced by
+  ;; (unsyntax gs)/(unsyntax-splicing gs); the alist maps each gs to its E.
+  (let ([collected '()])
+    (define (walk t)
+      (cond
+        [(not (pair? t)) t]
+        [(eq? (car t) 'unsyntax)
+         (let ([gs (gensym "us")])
+           (set! collected (cons (cons gs (cadr t)) collected))
+           (list 'unsyntax gs))]
+        [(eq? (car t) 'unsyntax-splicing)
+         (let ([gs (gensym "uss")])
+           (set! collected (cons (cons gs (cadr t)) collected))
+           (list 'unsyntax-splicing gs))]
+        [else (cons (walk (car t)) (walk (cdr t)))]))
+    (let ([tmpl2 (walk tmpl)])
+      (cons tmpl2 (reverse collected)))))
 
-(define (subst-quasi-syms expr gsyms in-quasi?)
-  ;; Substitute introduced symbols with their gensyms in quoted positions.
+;; instantiate-quasi: like instantiate but handles (unsyntax gs) via holes alist.
+;; holes = ((gs . value) ...) where each value was pre-computed from the user's expr.
+(define (instantiate-quasi template bindings evars holes)
   (cond
-    [(symbol? expr)
-     (if in-quasi?
-         (let ([g (assq expr gsyms)])
-           (if g (cdr g) expr))
-         expr)]
+    [(and (pair? template) (eq? (car template) 'unsyntax))
+     (let ([v (assq (cadr template) holes)])
+       (if v (cdr v) (anchor-error "unsyntax: missing hole" (cadr template))))]
+    [(and (pair? template) (eq? (car template) 'unsyntax-splicing))
+     (anchor-error "unsyntax-splicing: only valid in list context")]
+    [(ellipsis-escape? template)
+     (instantiate-escaped (cadr template) bindings evars)]
+    [(symbol? template)
+     (let ([b (assq template bindings)])
+       (if (and b (not (memv template evars))) (cdr b) template))]
+    [(pair? template)
+     (instantiate-quasi-list template bindings evars holes)]
+    [else template]))
+
+(define (instantiate-quasi-list items bindings evars holes)
+  (let loop ([rest items] [result '()])
+    (cond
+      [(null? rest) (reverse result)]
+      ;; unsyntax-splicing at head of current item
+      [(and (pair? (car rest)) (eq? (caar rest) 'unsyntax-splicing))
+       (let* ([v (assq (cadar rest) holes)]
+              [spliced (if v (cdr v) (anchor-error "unsyntax-splicing: missing hole" (cadar rest)))])
+         (unless (list? spliced)
+           (anchor-error "unsyntax-splicing: expected a list, got" spliced))
+         (loop (cdr rest) (append (reverse spliced) result)))]
+      ;; ellipsis
+      [(and (pair? (cdr rest)) (eq? (cadr rest) '...))
+       (let* ([item    (car rest)]
+              [used-ev (ellipsis-vars-in item evars)])
+         (if (null? used-ev)
+             (loop (cddr rest)
+                   (cons '... (cons (instantiate-quasi item bindings evars holes) result)))
+             (let* ([evar  (car used-ev)]
+                    [count (length (cdr (assq evar bindings)))])
+               (for-each (lambda (v)
+                           (unless (fx= (length (cdr (assq v bindings))) count)
+                             (anchor-error "mismatched ellipsis lengths")))
+                         used-ev)
+               (let expand ([k 0] [r result])
+                 (if (fx= k count)
+                     (loop (cddr rest) r)
+                     (let* ([sub-b  (map (lambda (e)
+                                           (if (memv (car e) used-ev)
+                                               (cons (car e) (list-ref (cdr e) k))
+                                               e))
+                                         bindings)]
+                            [sub-ev (filter (lambda (v) (not (memv v used-ev))) evars)]
+                            [expanded (instantiate-quasi item sub-b sub-ev holes)])
+                       (expand (fx+ k 1) (cons expanded r))))))))]
+      [else
+       (loop (cdr rest)
+             (cons (instantiate-quasi (car rest) bindings evars holes) result))])))
+
+;; ---------------------------------------------------------------------------
+;; Template-body transformer for macro (syntax-case) clauses
+;;
+;; Walks Chez code in a macro clause body and rewrites:
+;;   (syntax template)  →  (instantiate 'template <b-sym> '<evars>)
+;;   #'template         →  same (reader already expanded #' to (syntax ...))
+;;   (with-syntax ([pat expr] ...) body ...)
+;;              →  match each pat against expr, extend bindings alist, recurse
+;;
+;; b-sym  — Chez variable name holding the current match bindings alist
+;; evars  — list of ellipsis-bound pattern variable names at this scope
+;;
+;; Does NOT recurse into (quote ...) since that is literal data.
+;; ---------------------------------------------------------------------------
+
+(define (transform-syntax-bodies expr b-sym evars)
+  (cond
     [(not (pair? expr)) expr]
-    [(eq? (car expr) 'quasiquote)
-     (list 'quasiquote (subst-quasi-syms (cadr expr) gsyms #t))]
-    [(and in-quasi? (eq? (car expr) 'unquote))
-     (list 'unquote (subst-quasi-syms (cadr expr) gsyms #f))]
-    [(and in-quasi? (eq? (car expr) 'unquote-splicing))
-     (list 'unquote-splicing (subst-quasi-syms (cadr expr) gsyms #f))]
+    [(null? expr) expr]
+    [(eq? (car expr) 'quote) expr]
+    [(eq? (car expr) 'syntax)
+     ;; (syntax template) or #'template
+     `(instantiate ',(cadr expr) ,b-sym ',evars)]
+    [(eq? (car expr) 'quasisyntax)
+     ;; #`template with #,expr / #,@expr escapes
+     (let* ([extracted  (extract-unsyntax (cadr expr))]
+            [tmpl2      (car extracted)]
+            [pairs      (cdr extracted)]   ;; ((gs . chez-expr) ...)
+            [hole-binds (map (lambda (p) `[,(car p) ,(cdr p)]) pairs)]
+            [holes-arg  `(list ,@(map (lambda (p) `(cons ',(car p) ,(car p))) pairs))])
+       (if (null? pairs)
+           `(instantiate ',tmpl2 ,b-sym ',evars)
+           `(let ,hole-binds
+              (instantiate-quasi ',tmpl2 ,b-sym ',evars ,holes-arg))))]
+    [(eq? (car expr) 'with-syntax)
+     (transform-with-syntax (cadr expr) (cddr expr) b-sym evars)]
     [else
-     (cons (subst-quasi-syms (car expr) gsyms in-quasi?)
-           (subst-quasi-syms (cdr expr) gsyms in-quasi?))]))
+     (cons (transform-syntax-bodies (car expr) b-sym evars)
+           (transform-syntax-bodies (cdr expr) b-sym evars))]))
+
+(define (transform-with-syntax ws-clauses body b-sym evars)
+  ;; Each ws-clause is [pattern expr].
+  ;; Generate code that:
+  ;;   1. Runs match-pattern for each clause
+  ;;   2. Combines all match results into an extended bindings alist
+  ;;   3. Evaluates body with the extended alist in scope
+  (let* ([ws-evars    (apply append
+                             (map (lambda (cl) (ellipsis-bound-vars (car cl) '()))
+                                  ws-clauses))]
+         [all-evars   (append ws-evars evars)]
+         [new-b-sym   (gensym "wsb")]
+         [clause-syms (map (lambda (_) (gensym "wsbi")) ws-clauses)]
+         [combined-b  (fold-right (lambda (cs acc) `(append ,cs ,acc))
+                                  b-sym clause-syms)])
+    `(let* (,@(map (lambda (cs cl)
+                     `[,cs (match-pattern ',(car cl) ,(cadr cl) '() '())])
+                   clause-syms ws-clauses)
+            [,new-b-sym ,combined-b])
+       ,@(map (lambda (b) (transform-syntax-bodies b new-b-sym all-evars))
+              body))))
 
 (define (build-clause-chain form-var literals clauses)
   (if (null? clauses)
@@ -354,17 +486,21 @@
              [guard     (if has-guard (car tail) #f)]
              [template  (if has-guard (cadr tail) (car tail))]
              [pvars     (pattern-vars pattern literals)]
-             ;; Auto-hygiene: pre-gensym introduced names in quoted template positions
-             [introduced (template-sc-introduced template pvars literals)]
-             [gsyms      (map (lambda (n) (cons n (anchor-gensym n))) introduced)]
-             [template   (if (null? gsyms) template
-                             (subst-quasi-syms template gsyms #f))]
-             [bsym      (gensym "b")]
-             [binds     (map (lambda (v) `(,v (cdr (assq ',v ,bsym)))) pvars)])
+             [evars     (ellipsis-bound-vars pattern literals)]
+             ;; Rewrite (syntax tmpl) / #'tmpl / (with-syntax ...) in body.
+             ;; No pre-gensym scan needed — KFFD marks template-introduced symbols
+             ;; as macro-introduced after the XOR step, and the resolver renames any
+             ;; conflicting user bindings at that point.
+             [template   (transform-syntax-bodies template '_anc_cur_b evars)]
+             [bsym       (gensym "b")]
+             [binds      (map (lambda (v) `(,v (cdr (assq ',v ,bsym)))) pvars)])
         `(let ([,bsym (match-pattern ',pattern ,form-var ',literals '())])
            (if (not ,bsym)
                ,(build-clause-chain form-var literals (cdr clauses))
-               (let ,binds
+               ;; _anc_cur_b holds the full bindings alist for #'/with-syntax use
+               ;; _kw is the macro keyword (car of form) — a stx with use-site marks,
+               ;; suitable as the context argument to datum->syntax for anaphoric macros.
+               (let ([_anc_cur_b ,bsym] [_kw (car ,form-var)] ,@binds)
                  ,(if has-guard
                       `(if ,guard
                            ,template
@@ -378,14 +514,31 @@
   ;; environment that eval uses.  Pass all expander helpers the template might
   ;; call as outer lambda parameters so they are closed over lexically rather
   ;; than looked up by name at runtime.
-  ((eval `(lambda (match-pattern anchor-error id-sym anchor-gensym)
+  ((eval `(lambda (match-pattern anchor-error id-sym anchor-gensym instantiate instantiate-quasi datum->syntax)
             (lambda (_form)
               ,(build-clause-chain '_form lits-form clauses))))
-   match-pattern anchor-error id-sym anchor-gensym))
+   match-pattern anchor-error id-sym anchor-gensym instantiate instantiate-quasi anc-datum->syntax))
 
 ;; Identity helpers available in transformer bodies — Anchor AST is plain data.
 (define (anc-syntax->datum stx) stx)
-(define (anc-datum->syntax ctx datum) datum)
+
+;; datum->syntax: produce a symbol that appears to come from the SAME use site as ctx.
+;; Propagates marks from ctx to datum, making the result "user-provided" after the KFFD
+;; XOR step cancels those marks.  This is the tool for intentional (anaphoric) capture —
+;; the introduced name blends with the user's own identifiers from that call site.
+;;
+;; ctx can be any stx or form; marks are taken from the first stx found in it.
+;; Typical use: (datum->syntax _kw 'name) where _kw is the macro keyword.
+(define (anc-datum->syntax ctx datum)
+  (define (ctx-marks x)
+    (cond
+      [(stx? x)  (stx-marks x)]
+      [(pair? x) (ctx-marks (car x))]
+      [else      '()]))
+  (let ([m (ctx-marks ctx)])
+    (if (null? m)
+        datum
+        (make-stx datum m))))
 
 ;; Strip all stx wrappers recursively, returning plain Chez values.
 ;; Used when a generated define-syntax form has KFFD marks on its keywords.
@@ -403,7 +556,7 @@
     (unless (symbol? name)
       (anchor-error "define-syntax: name must be a symbol" name))
     (unless (pair? body)
-      (anchor-error "define-syntax: body must be (syntax-rules ...), (lambda ...), or (syntax-case ...)" body))
+      (anchor-error "define-syntax: body must be (syntax-rules ...), (lambda ...), or (macro-case ...)" body))
     (let ([transformer
            (case (car body)
              [(syntax-rules)
@@ -423,10 +576,10 @@
               ;; Transformer body is Chez code; eval it to get a procedure.
               ;; The procedure receives the full macro call form and returns the expansion.
               (eval body)]
-             [(syntax-case)
+             [(macro-case)
               (compile-syntax-case (cadr body) (cddr body))]
              [else
-              (anchor-error "define-syntax: expected syntax-rules, lambda, or syntax-case" body)])])
+              (anchor-error "define-syntax: expected syntax-rules, lambda, or macro-case" body)])])
       (cons name transformer))))
 
 ;; ---------------------------------------------------------------------------
