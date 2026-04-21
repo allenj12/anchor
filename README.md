@@ -208,6 +208,18 @@ The signature `((param-types...) -> ret-type)` matches the `ffi` declaration syn
     ))
 ```
 
+`byte-size` returns the allocation size of any value in bytes:
+
+```anchor
+(let arr (alloc (* 6 8)))
+(byte-size arr)   ; → 48
+(byte-size 42)    ; → 8  (scalar — always 8)
+(byte-size nil)   ; → 0
+```
+
+This is useful for passing arrays around without a separate length: divide by element
+size to recover element count, or use it as an end-of-allocation guard.
+
 `global-arena` declares a named arena whose backing buffer lives for the entire
 program. Use it when allocations need to outlive the function that creates them —
 linked lists, trees, or any per-request scratch buffer that gets rebuilt in a loop.
@@ -338,7 +350,9 @@ Auto-incrementing (omit the value):
 `cons` allocates a two-slot cell from the current arena.
 
 `nil` is `{NULL, 0}` — the same value serves as the empty list sentinel and as a
-null pointer. Pass it to any `ffi` function expecting a pointer; `null?` tests it.
+null pointer. Pass it to any `ffi` function expecting a pointer; `null?` tests for
+it by checking the size field, which is uniquely `0` for nil (distinct from integer
+`0`, which is an unboxed scalar with a different size tag).
 
 ```anchor
 (let lst (cons 1 (cons 2 (cons 3 nil))))

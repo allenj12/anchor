@@ -24,7 +24,7 @@
     sizeof break continue fn-ptr call-ptr call-ptr-c fn-c
     define-syntax syntax-rules macro-case syntax with-syntax quasisyntax unsyntax unsyntax-splicing quote quasiquote unquote unquote-splicing
     embed-bytes embed-string
-    cons car cdr nil null?
+    cons car cdr nil null? byte-size
     unpacked-struct union enum
     + - * / % +f -f *f /f +u -u *u /u %u
     == != < > <= >= ==f !=f <f >f <=f >=f <u >u <=u >=u
@@ -676,19 +676,22 @@
       (and (stx? x) (null? (stx-marks x)))))
 
 (define (resolve-id x env)
-  (if (id-user? x)
-      (let ([r (assq (id-sym x) env)]) (if r (cdr r) (id-sym x)))
-      (id-sym x)))  ;; macro-introduced: global ref, skip rename env
+  ;; Always check env first — a macro-introduced binding may have been gensymmed
+  ;; and added under its bare symbol key. Fall back to bare symbol.
+  (let ([sym (id-sym x)])
+    (let ([r (assq sym env)]) (if r (cdr r) sym))))
 
 ;; Walk form stripping stx and applying rename env.
 (define (resolve form env)
   (cond
     [(stx? form)
-     ;; Non-empty marks → macro-introduced global reference.
-     ;; Empty marks → user-provided; apply rename env.
-     (if (id-user? form)
-         (let ([r (assq (stx-sym form) env)]) (if r (cdr r) (stx-sym form)))
-         (stx-sym form))]
+     (let ([sym (stx-sym form)] [marks (stx-marks form)])
+       (if (null? marks)
+           ;; User-provided (empty marks): look up by bare symbol
+           (let ([r (assq sym env)]) (if r (cdr r) sym))
+           ;; Macro-introduced (non-empty marks): look up by (sym . marks)
+           ;; so user references to same name never accidentally find this entry
+           (let ([r (assoc (cons sym marks) env)]) (if r (cdr r) sym))))]
     [(symbol? form) (let ([r (assq form env)]) (if r (cdr r) form))]
     [(not (pair? form)) form]
     [(null? form) form]
@@ -742,12 +745,17 @@
             (let* ([binding (cadr stmt)]
                    [sym     (id-sym binding)]
                    [val     (caddr stmt)]
-                   ;; Rename only if this is a user-introduced binding that conflicts
-                   [new-sym (if (and (id-user? binding) (memv sym stx-names))
-                                (anchor-gensym sym)
-                                sym)]
+                   [marks   (if (stx? binding) (stx-marks binding) '())]
+                   [macro?  (not (id-user? binding))]
+                   ;; Macro-introduced binding: always gensym, key by (sym . marks)
+                   ;; User binding conflicting with macro global: gensym, key by bare sym
+                   [new-sym (cond
+                              [macro?              (anchor-gensym sym)]
+                              [(memv sym stx-names) (anchor-gensym sym)]
+                              [else sym])]
+                   [env-key (if macro? (cons sym marks) sym)]
                    [env2    (if (eq? new-sym sym) env
-                                (cons (cons sym new-sym) env))])
+                                (cons (cons env-key new-sym) env))])
               (cons (list 'let new-sym (resolve val env))
                     (resolve-seq (cdr stmts) stx-names env2)))
             (cons (resolve stmt env)

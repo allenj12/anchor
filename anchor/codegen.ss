@@ -153,7 +153,7 @@ static inline ANCHOR_PURE AnchorVal anchor_gef(AnchorVal a, AnchorVal b) { retur
  */
 
 #define ANCHOR_NIL         ((AnchorVal){NULL, 0})
-#define ANCHOR_NULLP(v)    ((v).ptr == NULL)
+#define ANCHOR_NULLP(v)    ((v).size == 0)
 #define ANCHOR_CAR(cell)   (((AnchorVal*)(cell).ptr)[0])
 #define ANCHOR_CDR(cell)   (((AnchorVal*)(cell).ptr)[1])
 
@@ -183,18 +183,25 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a) {
 ;; ---------------------------------------------------------------------------
 
 (define (c-ident sym)
-  ;; Accept plain symbols or stx objects (safety: resolve-marks should have
-  ;; stripped all marks before codegen, but guard here just in case).
-  (let ([s (if (stx? sym) (stx-sym sym) sym)])
-    (list->string
-      (let loop ([cs (string->list (symbol->string s))])
-        (if (null? cs) '()
-            (case (car cs)
-              [(#\-) (cons #\_ (loop (cdr cs)))]
-              [(#\!) (append (string->list "_mut") (loop (cdr cs)))]
-              [(#\?) (append (string->list "_p")   (loop (cdr cs)))]
-              [(#\.) (append (string->list "_dot_") (loop (cdr cs)))]
-              [else  (cons (car cs) (loop (cdr cs)))]))))))
+  ;; Macro-introduced symbols carry marks — encode them in the C name so two
+  ;; expansions of the same template produce distinct C identifiers.
+  (let* ([marks  (if (stx? sym) (stx-marks sym) '())]
+         [s      (if (stx? sym) (stx-sym sym) sym)]
+         [base   (list->string
+                   (let loop ([cs (string->list (symbol->string s))])
+                     (if (null? cs) '()
+                         (case (car cs)
+                           [(#\-) (cons #\_ (loop (cdr cs)))]
+                           [(#\!) (append (string->list "_mut") (loop (cdr cs)))]
+                           [(#\?) (append (string->list "_p")   (loop (cdr cs)))]
+                           [(#\.) (append (string->list "_dot_") (loop (cdr cs)))]
+                           [else  (cons (car cs) (loop (cdr cs)))]))))])
+    (if (null? marks)
+        base
+        (string-append base "_anc"
+                       (apply string-append
+                              (map (lambda (m) (string-append "_" (number->string m)))
+                                   marks))))))
 
 
 (define (pointer-type? s)
@@ -390,6 +397,11 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a) {
          [(eq? h 'null?)
           (unless (fx= (length args) 1) (anchor-error "null?: (null? lst)"))
           (string-append "anchor_int(ANCHOR_NULLP(" (emit-expr (car args) ctx pre) "))")]
+
+         [(eq? h 'byte-size)
+          (unless (fx= (length args) 1) (anchor-error "byte-size: (byte-size val)"))
+          (let ([v (emit-expr (car args) ctx pre)])
+            (string-append "anchor_int((" v ").size & ANCHOR_UNBOXED ? 8 : (intptr_t)(" v ").size)"))]
 
          ;; embed-bytes: (embed-bytes bv) — explicit bytevector embedding
          [(eq? h 'embed-bytes)

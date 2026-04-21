@@ -75,6 +75,13 @@
                (let-values ([(tok j) (read-string src i len)])
                  (set! tokens (cons tok tokens))
                  (loop j))]
+              ;; #\<char> or #\<name> — Chez-style char literal
+              [(and (char=? c #\#)
+                    (fx< (fx+ i 1) len)
+                    (char=? (string-ref src (fx+ i 1)) #\\))
+               (let-values ([(tok j) (read-hash-char-literal src i len)])
+                 (set! tokens (cons tok tokens))
+                 (loop j))]
               ;; Char literal: \x... or \<single>
               [(and (char=? c #\\)
                     (fx< (fx+ i 1) len)
@@ -104,6 +111,25 @@
          (loop (fx+ i 2) (cons (string-ref src (fx+ i 1)) (cons #\\ chars)))]
         [else
          (loop (fx+ i 1) (cons c chars))]))))
+
+(define (read-hash-char-literal src start len)
+  ;; #\<name> or #\<single-char> — Chez Scheme style
+  ;; start points at '#'; src[start+1] = '\'
+  (let ([ci (fx+ start 2)])  ; index of char after #\
+    (when (fx>= ci len)
+      (anchor-error "truncated #\\ char literal"))
+    (let ([c (string-ref src ci)])
+      ;; Read a word if letter, else single char (handles #\[ #\( etc.)
+      (if (char-alphabetic? c)
+          (let loop ([i ci] [chars '()])
+            (if (or (fx>= i len)
+                    (let ([ch (string-ref src i)])
+                      (or (char-whitespace? ch)
+                          (memv ch '(#\( #\) #\[ #\] #\; #\" #\, #\` #\')))))
+                (values (string-append "#\\" (list->string (reverse chars))) i)
+                (loop (fx+ i 1) (cons (string-ref src i) chars))))
+          ;; Single delimiter/punctuation char — read just that one
+          (values (string-append "#\\" (string c)) (fx+ ci 1))))))
 
 (define (read-char-literal src start len)
   ;; \xHH...  or  \<single-non-whitespace-char>
@@ -252,6 +278,15 @@
   (cond
     [(string=? tok "#t") #t]
     [(string=? tok "#f") #f]
+    ;; #\<name> or #\<char> — delegate to Chez reader; tok is already valid Chez syntax
+    [(and (fx>= (string-length tok) 3)
+          (char=? (string-ref tok 0) #\#)
+          (char=? (string-ref tok 1) #\\))
+     (let ([c (guard (exn [#t (anchor-error "unknown char literal" tok)])
+                (read (open-input-string tok)))])
+       (if (char? c)
+           (char->integer c)
+           (anchor-error "unknown char literal" tok)))]
     [(and (fx> (string-length tok) 2)
           (char=? (string-ref tok 0) #\0)
           (or (char=? (string-ref tok 1) #\x)
