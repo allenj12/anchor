@@ -8,20 +8,33 @@
     (string-append (symbol->string base) "_G"
                    (number->string *gensym-counter*))))
 
+;; ---------------------------------------------------------------------------
+;; Source locations
+;; ---------------------------------------------------------------------------
+
+(define (format-src src)
+  (if src
+      (string-append (car src) ":" (number->string (cadr src)) ":" (number->string (caddr src)) ": ")
+      ""))
+
 (define (anchor-error msg . irritants)
   (apply error "anchorc" msg irritants))
+
+(define (anchor-error/loc form msg . irritants)
+  (let ([src (stx-loc form)])
+    (apply error "anchorc" (string-append (format-src src) msg) irritants)))
 
 ;; ---------------------------------------------------------------------------
 ;; Syntax objects — KFFD hygiene marks
 ;; ---------------------------------------------------------------------------
 
-;; A syntax object pairs an identifier with its mark set.
-;; Marks track which macro application introduced the identifier.
-;; Naming the type 'stx' gives us make-stx / stx? / stx-sym / stx-marks for free.
+;; A syntax object pairs an identifier with its mark set and source location.
+;; src is (file line col) or #f.
 (define-record-type stx
   (fields
     (immutable sym   stx-sym)
-    (immutable marks stx-marks)))
+    (immutable marks stx-marks)
+    (immutable src   stx-src)))
 
 (define *mark-clock* 0)
 (define (fresh-mark)
@@ -37,13 +50,19 @@
 ;; Strip any stx wrapper; return the base symbol.
 (define (id-sym x) (if (stx? x) (stx-sym x) x))
 
-;; Add mark m to every identifier in form.
-;; XOR property: (add-mark (add-mark form m) m) = form, so applying the same
-;; mark twice cancels — user-provided identifiers come back clean.
+;; Find the src of the first stx in form.
+(define (stx-loc form)
+  (cond
+    [(stx? form)  (stx-src form)]
+    [(pair? form) (or (stx-loc (car form)) (stx-loc (cdr form)))]
+    [else         #f]))
+
+;; Add mark m to every identifier in form, preserving src.
+;; XOR property: (add-mark (add-mark form m) m) = form.
 (define (add-mark form m)
   (cond
-    [(symbol? form) (make-stx form (list m))]
-    [(stx? form)    (make-stx (stx-sym form) (mark-flip (stx-marks form) m))]
+    [(symbol? form) (make-stx form (list m) #f)]
+    [(stx? form)    (make-stx (stx-sym form) (mark-flip (stx-marks form) m) (stx-src form))]
     [(pair? form)   (cons (add-mark (car form) m) (add-mark (cdr form) m))]
     [else form]))
 

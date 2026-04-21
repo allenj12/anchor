@@ -598,17 +598,16 @@ constructor, and accessor functions:
 By default macros are hygienic: names introduced in a template never clash with
 names at the call site.  For deliberately anaphoric macros (e.g. `aif`, which
 binds `it` for the user to reference), use `datum->syntax` to place a name in the
-call-site scope.  `_kw` is always bound in `macro-case` clause bodies — it is the
-macro keyword with use-site marks, the standard context argument:
+call-site scope.  Name the keyword position in the pattern (rather than `_`) to
+get a handle carrying the call-site marks:
 
 ```anchor
 (define-syntax aif
   (macro-case ()
-    [(_ test then else-clause)
-     (let ([it-id (datum->syntax _kw 'it)])
-       #`(block
-           (let #,it-id #,test)
-           (if #,it-id #,then #,else-clause)))]))
+    [(self test then else-clause)
+     `(block
+        (let ,(datum->syntax self 'it) ,test)
+        (if ,(datum->syntax self 'it) ,then ,else-clause))]))
 
 (aif (find-item key table)
   (printf "found: %d\n" (cast int it))

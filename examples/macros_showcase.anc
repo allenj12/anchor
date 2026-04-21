@@ -168,26 +168,22 @@
 (define-syntax define-struct
   (macro-case ()
     [(_ name (field size) ...)
-     (let* ([sname  (id-sym name)]
-            [cname  (string->symbol
-                      (string-append "make-" (symbol->string sname)))]
-            [pnames (map (lambda (f)
-                           (string->symbol
-                             (string-append "p_" (symbol->string (id-sym f)))))
-                         field)]
-            [anames (map (lambda (f)
-                           (string->symbol
-                             (string-append (symbol->string sname) "-" (symbol->string (id-sym f)))))
-                         field)])
-       `(do
-          (struct ,name ,@(map list field size))
-          (fn ,cname (,@pnames)
-            (let _ptr (alloc (sizeof ,name)))
-            ,@(map (lambda (f p) `(field-set! ,sname _ptr ,f ,p)) field pnames)
-            (return _ptr))
-          ,@(map (lambda (aname f)
-                   `(fn ,aname (s) (return (field-get ,sname s ,f))))
-                 anames field)))]))
+     (let ([sname (symbol->string (id-sym name))])
+       (with-syntax
+         ([make-name (string->symbol (string-append "make-" sname))]
+          [(pname ...) (map (lambda (f)
+                              (string->symbol (string-append "p_" (symbol->string (id-sym f)))))
+                            field)]
+          [(aname ...) (map (lambda (f)
+                              (string->symbol (string-append sname "-" (symbol->string (id-sym f)))))
+                            field)])
+         #'(do
+             (struct name (field size) ...)
+             (fn make-name (pname ...)
+               (let _ptr (alloc (sizeof name)))
+               (field-set! name _ptr field pname) ...
+               (return _ptr))
+             (fn aname (s) (return (field-get name s field))) ...)))]))
 
 ; ---------------------------------------------------------------------------
 ; 6. macro-case with guard: unroll

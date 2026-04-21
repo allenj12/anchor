@@ -297,7 +297,7 @@
     (lambda (form)
       (let try ([rules compiled])
         (if (null? rules)
-            (anchor-error "no matching syntax-rules clause" form)
+            (anchor-error/loc form "no matching syntax-rules clause")
             (let* ([rule       (car rules)]
                    [pattern    (list-ref rule 0)]
                    [template   (list-ref rule 1)]
@@ -309,7 +309,7 @@
                                       introduced)]
                          [full-b (append gsyms bindings)])
                     (instantiate template full-b evars))
-                  (try (cdr rules))))))))  )
+                  (try (cdr rules)))))))))
 
 ;; ---------------------------------------------------------------------------
 ;; syntax-case transformer compiler
@@ -477,7 +477,7 @@
 
 (define (build-clause-chain form-var literals clauses)
   (if (null? clauses)
-      `(anchor-error "no matching syntax-case clause" ,form-var)
+      `(anchor-error/loc ,form-var "no matching macro-case clause")
       (let* ([clause    (car clauses)]
              [pattern   (car clause)]
              [tail      (cdr clause)]
@@ -498,9 +498,7 @@
            (if (not ,bsym)
                ,(build-clause-chain form-var literals (cdr clauses))
                ;; _anc_cur_b holds the full bindings alist for #'/with-syntax use
-               ;; _kw is the macro keyword (car of form) — a stx with use-site marks,
-               ;; suitable as the context argument to datum->syntax for anaphoric macros.
-               (let ([_anc_cur_b ,bsym] [_kw (car ,form-var)] ,@binds)
+               (let ([_anc_cur_b ,bsym] ,@binds)
                  ,(if has-guard
                       `(if ,guard
                            ,template
@@ -514,10 +512,10 @@
   ;; environment that eval uses.  Pass all expander helpers the template might
   ;; call as outer lambda parameters so they are closed over lexically rather
   ;; than looked up by name at runtime.
-  ((eval `(lambda (match-pattern anchor-error id-sym anchor-gensym instantiate instantiate-quasi datum->syntax)
+  ((eval `(lambda (match-pattern anchor-error anchor-error/loc id-sym anchor-gensym instantiate instantiate-quasi datum->syntax)
             (lambda (_form)
               ,(build-clause-chain '_form lits-form clauses))))
-   match-pattern anchor-error id-sym anchor-gensym instantiate instantiate-quasi anc-datum->syntax))
+   match-pattern anchor-error anchor-error/loc id-sym anchor-gensym instantiate instantiate-quasi anc-datum->syntax))
 
 ;; Identity helpers available in transformer bodies — Anchor AST is plain data.
 (define (anc-syntax->datum stx) stx)
@@ -528,17 +526,16 @@
 ;; the introduced name blends with the user's own identifiers from that call site.
 ;;
 ;; ctx can be any stx or form; marks are taken from the first stx found in it.
-;; Typical use: (datum->syntax _kw 'name) where _kw is the macro keyword.
+;; Typical use: (datum->syntax self 'name) where self is the keyword pattern variable.
 (define (anc-datum->syntax ctx datum)
   (define (ctx-marks x)
-    (cond
-      [(stx? x)  (stx-marks x)]
-      [(pair? x) (ctx-marks (car x))]
-      [else      '()]))
-  (let ([m (ctx-marks ctx)])
+    (cond [(stx? x) (stx-marks x)] [(pair? x) (ctx-marks (car x))] [else '()]))
+  (define (ctx-src x)
+    (cond [(stx? x) (stx-src x)] [(pair? x) (or (ctx-src (car x)) (ctx-src (cdr x)))] [else #f]))
+  (let ([m (ctx-marks ctx)] [s (ctx-src ctx)])
     (if (null? m)
         datum
-        (make-stx datum m))))
+        (make-stx datum m s))))
 
 ;; Strip all stx wrappers recursively, returning plain Chez values.
 ;; Used when a generated define-syntax form has KFFD marks on its keywords.
@@ -685,12 +682,14 @@
 (define (resolve form env)
   (cond
     [(stx? form)
-     (let ([sym (stx-sym form)] [marks (stx-marks form)])
+     (let ([sym (stx-sym form)] [marks (stx-marks form)] [src (stx-src form)])
        (if (null? marks)
-           ;; User-provided (empty marks): look up by bare symbol
-           (let ([r (assq sym env)]) (if r (cdr r) sym))
+           ;; User-provided (empty marks): look up by bare symbol.
+           ;; Preserve source location if not renamed.
+           (let ([r (assq sym env)])
+             (if r (cdr r)
+                 (if src (make-stx sym '() src) sym)))
            ;; Macro-introduced (non-empty marks): look up by (sym . marks)
-           ;; so user references to same name never accidentally find this entry
            (let ([r (assoc (cons sym marks) env)]) (if r (cdr r) sym))))]
     [(symbol? form) (let ([r (assq form env)]) (if r (cdr r) form))]
     [(not (pair? form)) form]
@@ -718,6 +717,35 @@
                               params)])
             (cons 'fn (cons (resolve-id nm env)
                             (cons ps2 (resolve-seq body stx env2)))))]
+         ;; fn-c — same param-rename logic as fn; params are (type... name) sub-lists
+         [(eq? hs 'fn-c)
+          (let* ([nm     (cadr form)]
+                 [params (if (pair? (cddr form)) (caddr form) '())]
+                 [rest   (if (pair? (cddr form)) (cdddr form) '())]
+                 [body   (if (and (pair? rest) (eq? (id-sym (car rest)) '->))
+                             (cddr rest) rest)]
+                 [stx    (delete-duplicates (collect-stx-names body))]
+                 ;; Last element of each param sub-list is the binding name
+                 [p-env  (filter-map
+                           (lambda (p)
+                             (and (pair? p)
+                                  (let ([pname (list-ref p (fx- (length p) 1))])
+                                    (and (id-user? pname)
+                                         (memv (id-sym pname) stx)
+                                         (cons (id-sym pname) (anchor-gensym (id-sym pname)))))))
+                           params)]
+                 [env2   (append p-env env)]
+                 [ps2    (map (lambda (p)
+                                (if (pair? p)
+                                    (let* ([n     (length p)]
+                                           [pname (list-ref p (fx- n 1))]
+                                           [r     (assq (id-sym pname) p-env)])
+                                      (append (map id-sym (list-head p (fx- n 1)))
+                                              (list (if r (cdr r) (id-sym pname)))))
+                                    (list (id-sym p))))
+                              params)])
+            (cons 'fn-c (cons (resolve-id nm env)
+                              (cons ps2 (map (lambda (x) (resolve x env2)) rest)))))]
          ;; block / do / while — sequential bodies with let threading
          [(memv hs '(block do))
           (let ([stx (delete-duplicates (collect-stx-names form))])

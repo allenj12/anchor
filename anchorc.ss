@@ -129,14 +129,14 @@
                   (display (string-append "anchorc: file not found: " p "\n"))
                   (exit 1)))
               inputs)
-    (let* ([prelude (anchor-parse (read-file (string-append (effective-compiler-dir) "/anchor/prelude.anc")))]
-           [ast    (append prelude (apply append (map (lambda (p) (anchor-parse (read-file p))) inputs)))]
+    (let* ([prelude (anchor-parse (read-file (string-append (effective-compiler-dir) "/anchor/prelude.anc")) "<prelude>")]
+           [ast    (append prelude (apply append (map (lambda (p) (anchor-parse (read-file p) p)) inputs)))]
            [base   (path-strip-extension (car inputs))]
            [cc     (opts 'cc)]
            [cflags (opts 'cflags)])
         (cond
           [(opts 'emit-ast)
-           (for-each (lambda (node) (pretty-print node) (newline)) ast)]
+           (for-each (lambda (node) (pretty-print (strip-marks node)) (newline)) ast)]
           [(opts 'emit-exp)
            (let ([expanded (expand-all ast)])
              (for-each (lambda (node) (pretty-print node) (newline)) expanded))]
