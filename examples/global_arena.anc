@@ -16,7 +16,7 @@
 
 ; Declare a named global arena with a 64 KiB backing buffer.
 ; The buffer is static — allocated once, never freed.
-(global-arena scratch 65536)
+(global-arena scratch (kb 64))
 
 ; Build a linked list of integers [n, n-1, ..., 1] in the global arena.
 ; Returning a pointer into a global arena is always safe — nothing is freed.

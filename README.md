@@ -102,6 +102,20 @@ Tail calls are not optimized; use `while` for loops.
 (<u a b)  (>u a b)  ; unsigned comparisons
 ```
 
+### Character literals
+
+Anchor uses Chez Scheme's `#\` syntax. Character literals evaluate to their Unicode codepoint as an integer:
+
+```anchor
+#\a        ; 97
+#\newline  ; 10
+#\space    ; 32
+#\tab      ;  9
+#\nul      ;  0
+#\x41      ; 65  (hex codepoint)
+#\[        ; 91  (punctuation)
+```
+
 ### FFI
 
 Declare a C function once; call it directly. Fixed parameters are automatically cast
@@ -200,8 +214,16 @@ The signature `((param-types...) -> ret-type)` matches the `ffi` declaration syn
 
 `alloc` bumps the current arena pointer — O(1), no `malloc` overhead.
 
+`kb`, `mb`, and `gb` are built-in size macros that expand at compile time — they produce no C output:
+
 ```anchor
-(with-arena 4194304      ; 4 MB arena
+(with-arena (mb 4) ...)
+(global-arena scratch (kb 64))
+(alloc (kb 512))
+```
+
+```anchor
+(with-arena (mb 4)       ; 4 MB arena
   (fn process (n)
     (let buf (alloc (* n 8)))   ; slice of arena bytes
     ; buf freed automatically when process returns
@@ -224,8 +246,21 @@ size to recover element count, or use it as an end-of-allocation guard.
 program. Use it when allocations need to outlive the function that creates them —
 linked lists, trees, or any per-request scratch buffer that gets rebuilt in a loop.
 
+To attach a global arena to a function so all its allocations go there, wrap the
+`fn` definition with `with-arena`:
+
 ```anchor
-(global-arena scratch 65536)   ; 64 KiB, allocated once
+(global-arena scratch (kb 64))
+
+(with-arena scratch
+  (fn build-list (n) ...))     ; all allocs inside go into scratch
+```
+
+This is equivalent to `(with-arena scratch ...)` inside the function body but
+signals intent at the definition site. Multiple functions can be wrapped together.
+
+```anchor
+(global-arena scratch (kb 64))   ; 64 KiB, allocated once
 
 (fn build-list (n)
   (with-arena scratch           ; directs allocations into scratch
@@ -245,7 +280,30 @@ linked lists, trees, or any per-request scratch buffer that gets rebuilt in a lo
 
 Returning a list from a `with-arena scratch` block is safe because the backing
 memory is permanent. Contrast with anonymous `with-arena` scopes, where returning
-a linked structure would dangle — only flat values copy out correctly there.
+a linked structure would dangle — only flat values copy out correctly on return.
+
+`with-parent-arena` temporarily redirects allocations into the arena one level up
+the stack. Use it to deep-copy a data structure out of a scope that is about to end:
+
+```anchor
+(fn list-copy (lst)
+  (if (null? lst)
+    (return nil))
+  (with-parent-arena
+    (return (cons (car lst) (list-copy (cdr lst))))))
+
+(with-arena
+  (fn main ()
+    (let original nil)
+    (with-arena
+      (set! original (cons 1 (cons 2 (cons 3 nil))))
+      (set! original (list-copy original)))  ; copied into outer arena before inner dies
+    ; original is safe to use here
+    ))
+```
+
+Nesting `with-parent-arena` climbs one level each time. Global arenas behave the
+same as local ones — the parent of whatever arena is currently active is used.
 
 `(ref expr)` takes a stack address; `(deref ptr)` reads through one. Useful for
 passing values by pointer to C functions that write into them.
@@ -339,14 +397,14 @@ Auto-incrementing (omit the value):
 (global count 0)              ; mutable global AnchorVal
 (global-set! count (+ count 1))
 
-(global buf (alloc 65536))    ; static 64 KB buffer
+(global buf (alloc (kb 64)))  ; static 64 KB buffer
 
 (const max-size 4096)         ; immutable — compiler may fold it
 ```
 
 ### Linked lists
 
-`cons`, `car`, `cdr`, `nil`, and `null?` are built into the language.
+`cons`, `car`, `cdr`, `set-car!`, `set-cdr!`, `nil`, and `null?` are built into the language.
 `cons` allocates a two-slot cell from the current arena.
 
 `nil` is `{NULL, 0}` — the same value serves as the empty list sentinel and as a
@@ -361,6 +419,13 @@ it by checking the size field, which is uniquely `0` for nil (distinct from inte
 (while (! (null? cur))
   (printf "%d\n" (cast int (car cur)))
   (set! cur (cdr cur)))
+```
+
+`set-car!` and `set-cdr!` mutate a cons cell in place:
+
+```anchor
+(set-car! lst 99)          ; replace head value
+(set-cdr! lst (cons 5 nil)) ; replace tail
 ```
 
 ---
