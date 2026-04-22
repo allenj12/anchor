@@ -1,6 +1,6 @@
 ; structs.anc — structs, nested structs, unions, enums
 ; Shows: struct layout, sizeof for nesting, union overlapping fields,
-;        enum constants, array-of-structs, field-get/field-set!
+;        enum constants, array-of-structs, get/set!
 
 (include <stdio.h>)
 (ffi printf (const char* ...) -> int)
@@ -13,14 +13,14 @@
 
 (fn make-point (px py)
   (let p (alloc (sizeof Point)))
-  (field-set! Point p x px)
-  (field-set! Point p y py)
+  (set! p Point x px)
+  (set! p Point y py)
   (return p))
 
 (fn point-dist2 (a b)
   ; returns squared distance between two points
-  (let dx (- (field-get Point a x) (field-get Point b x)))
-  (let dy (- (field-get Point a y) (field-get Point b y)))
+  (let dx (- (get a Point x) (get b Point x)))
+  (let dy (- (get a Point y) (get b Point y)))
   (return (+ (* dx dx) (* dy dy))))
 
 ; ---------------------------------------------------------------------------
@@ -33,17 +33,17 @@
 
 (fn make-aabb (x0 y0 x1 y1)
   (let b (alloc (sizeof AABB)))
-  (field-set! AABB b min Point x x0)
-  (field-set! AABB b min Point y y0)
-  (field-set! AABB b max Point x x1)
-  (field-set! AABB b max Point y y1)
+  (set! b AABB min Point x x0)
+  (set! b AABB min Point y y0)
+  (set! b AABB max Point x x1)
+  (set! b AABB max Point y y1)
   (return b))
 
 (fn aabb-width (b)
-  (return (- (field-get AABB b max Point x) (field-get AABB b min Point x))))
+  (return (- (get b AABB max Point x) (get b AABB min Point x))))
 
 (fn aabb-height (b)
-  (return (- (field-get AABB b max Point y) (field-get AABB b min Point y))))
+  (return (- (get b AABB max Point y) (get b AABB min Point y))))
 
 ; ---------------------------------------------------------------------------
 ; Union — same bytes, two interpretations
@@ -56,8 +56,8 @@
 ; store an integer, reinterpret as float (type-punning)
 (fn int-bits-as-float (n)
   (let u (alloc (sizeof Num)))
-  (field-set! Num u as-int n)
-  (return (field-get Num u as-float)))
+  (set! u Num as-int n)
+  (return (get u Num as-float)))
 
 ; ---------------------------------------------------------------------------
 ; Enum — named integer constants
@@ -99,12 +99,12 @@
   ; allocate n 8-byte slots and wrap in a Slice
   (let buf (alloc (* n 8)))
   (let s (alloc (sizeof Slice)))
-  (field-set! Slice s (val buf) buf)
+  (set! s Slice (val buf) buf)
   (return s))
 
 (fn slice-len (s)
   ; recover full AnchorVal and divide by element size
-  (let v (field-get Slice s (val buf)))
+  (let v (get s Slice (val buf)))
   (return (/ (byte-size v) 8)))
 
 ; ---------------------------------------------------------------------------
@@ -118,8 +118,8 @@
     (let p (+ buf (* i stride)))
     (printf "  [%d] x=%d y=%d\n"
       (cast int i)
-      (cast int (field-get Point p x))
-      (cast int (field-get Point p y)))
+      (cast int (get p Point x))
+      (cast int (get p Point y)))
     (set! i (+ i 1))))
 
 ; ---------------------------------------------------------------------------
@@ -133,8 +133,8 @@
     (let a (make-point 3 4))
     (let b (make-point 6 8))
     (printf "a=(%d,%d) b=(%d,%d)\n"
-      (cast int (field-get Point a x)) (cast int (field-get Point a y))
-      (cast int (field-get Point b x)) (cast int (field-get Point b y)))
+      (cast int (get a Point x)) (cast int (get a Point y))
+      (cast int (get b Point x)) (cast int (get b Point y)))
     (printf "squared distance: %d\n" (cast int (point-dist2 a b)))
 
     ; nested struct
@@ -160,8 +160,8 @@
     ; split variant: store buf in two separate 8-byte fields
     (let sp (alloc (sizeof Split)))
     (let raw (alloc (* 3 8)))
-    (field-set! Split sp (val data len) raw)
-    (let sv (field-get Split sp (val data len)))
+    (set! sp Split (val data len) raw)
+    (let sv (get sp Split (val data len)))
     (printf "split byte-size: %d\n" (cast int (byte-size sv)))
 
     ; array of structs
@@ -171,8 +171,8 @@
     (let i 0)
     (while (< i n)
       (let p (+ pts (* i stride)))
-      (field-set! Point p x (* i 10))
-      (field-set! Point p y (* i 10))
+      (set! p Point x (* i 10))
+      (set! p Point y (* i 10))
       (set! i (+ i 1)))
     (printf "points:\n")
     (print-points pts n)))

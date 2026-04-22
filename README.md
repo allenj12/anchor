@@ -323,12 +323,12 @@ Fields default to 8 bytes. Specify smaller sizes explicitly (e.g. 4 for `int`,
 (struct Point (x 8) (y 8))
 
 (let p (alloc (sizeof Point)))
-(field-set! Point p x 100)
-(field-set! Point p y 200)
-(let px (field-get Point p x))   ; → anchor_int(100)
+(set! p Point x 100)
+(set! p Point y 200)
+(let px (get p Point x))   ; → anchor_int(100)
 ```
 
-Nest structs inline using `(sizeof Name)` as the field size. Chain `field-get` and `field-set!` to navigate nested structs in one call — no intermediate variable needed. Use `->` to follow a stored pointer instead of navigating into inline bytes:
+`get` and `set!` take the pointer first, then the struct type, then fields. Nest structs inline using `(sizeof Name)` as the field size — chain field names to navigate without an intermediate variable. Use `->` to follow a stored pointer instead of navigating into inline bytes:
 
 ```anchor
 (struct AABB
@@ -338,27 +338,52 @@ Nest structs inline using `(sizeof Name)` as the field size. Chain `field-get` a
 (let b (alloc (sizeof AABB)))
 
 ;; chained — embedded: navigate into inline Point bytes
-(field-set! AABB b min Point x 0)
-(field-set! AABB b min Point y 0)
-(field-set! AABB b max Point x 800)
-(field-set! AABB b max Point y 600)
-(let x0 (field-get AABB b min Point x))
+(set! b AABB min Point x 0)
+(set! b AABB min Point y 0)
+(set! b AABB max Point x 800)
+(set! b AABB max Point y 600)
+(let x0 (get b AABB min Point x))
 
 ;; pointer field — node.next stores an address to another Node
 ;; (struct Node (val 8) (next 8))
-(field-get Node n next -> Node val)   ; -> signals pointer dereference
+(get n Node nxt -> Node val)   ; -> signals pointer dereference
+(set! n Node nxt -> Node val 99)
 ```
 
-Array of structs — step by `sizeof`:
+Stopping a chain at a type name returns a fat pointer to the embedded struct:
 
 ```anchor
-(let buf (alloc (* n (sizeof Point))))
+(let inner (get b AABB min Point))   ; {ptr+offset, sizeof(Point)} — chainable
+```
+
+### Arrays
+
+`[i stride]` inside `get`/`set!` indexes into a flat buffer:
+
+```anchor
+(let arr (alloc (* n 8)))
+(set! arr [0 8] 42)
+(let v (get arr [0 8]))      ; scalar read
+
+;; array of structs — indexed step then named chain in one form
+(let pts (alloc (* n (sizeof Point))))
 (let stride (sizeof Point))
-(let i 0)
-(while (< i n)
-  (let p (+ buf (* i stride)))
-  (field-get Point p x)
-  (set! i (+ i 1)))
+(set! pts [0 stride] Point x 10)
+(set! pts [0 stride] Point y 20)
+(let x0 (get pts [0 stride] Point x))
+
+;; stopping at the type returns a fat pointer to the element
+(let p (get pts [1 stride] Point))   ; {pts.ptr + 1*stride, sizeof(Point)}
+```
+
+`[i stride]` followed by `->` dereferences a stored pointer:
+
+```anchor
+;; array of pointers — follow stored pointer and chain into struct
+(let arr (alloc (* n 8)))
+(set! arr [0 8] p0)
+(let x (get arr [0 8] -> Point x))
+(set! arr [0 8] -> Point x 99)
 ```
 
 **Storing fat pointers in struct fields.** When you store a pointer into a field, only the address is kept — `byte-size` on the recovered value falls back to the compile-time type size. To preserve the runtime size (e.g. for a dynamic array), use `(val ...)` as the final field specifier:
@@ -366,14 +391,22 @@ Array of structs — step by `sizeof`:
 ```anchor
 ;; 1-field: 16-byte field stores the full AnchorVal (ptr + size) verbatim
 (struct Slot (buf 16))
-(field-set! Slot s (val buf) data)        ; store
-(let v (field-get Slot s (val buf)))      ; recover — byte-size works
+(set! s Slot (val buf) data)        ; store
+(let v (get s Slot (val buf)))      ; recover — byte-size works
 
 ;; 2-field: split across two 8-byte fields (also individually accessible)
 (struct DynArray (data 8) (len 8))
-(field-set! DynArray arr (val data len) buf)
-(let v (field-get DynArray arr (val data len)))
+(set! arr DynArray (val data len) buf)
+(let v (get arr DynArray (val data len)))
 (printf "elements: %d\n" (cast int (/ (byte-size v) (sizeof Elem))))
+```
+
+**Fat pointer arrays.** Use `[(val i)]` to store and retrieve full AnchorVals (ptr + size) from a 16-byte-per-element array:
+
+```anchor
+(let arr (alloc (* n 16)))
+(set! arr [(val 0)] buf)             ; store full AnchorVal at slot 0
+(let v (get arr [(val 0)]))          ; recover — byte-size intact
 ```
 
 The retrieved value is a fully boxed `AnchorVal` — `byte-size`, pointer arithmetic, and all Anchor operations work on it normally.
@@ -388,9 +421,9 @@ All fields share offset 0. Total size is the largest field.
   (as-float 8))
 
 (let u (alloc (sizeof Num)))
-(field-set! Num u as-int 42)
-(field-get  Num u as-int)    ; 42
-(field-get  Num u as-float)  ; reinterpret same bits as double
+(set! u Num as-int 42)
+(get u Num as-int)    ; 42
+(get u Num as-float)  ; reinterpret same bits as double
 ```
 
 ### Enums
@@ -534,13 +567,13 @@ With `#'` or `` #` ``, the pattern engine handles `var ...` expansion directly.
           (let ,name (alloc ,size))
           ,@(let loop ([i 0] [vs val])
               (if (null? vs) '()
-                  (cons `(array-set! ,name ,i ,(car vs))
+                  (cons `(set! ,name (,i 8) ,(car vs))
                         (loop (+ i 1) (cdr vs)))))))]))
 
 (arena-array primes 2 3 5 7 11 13)
 ; expands to: (let primes (alloc 48))
-;             (array-set! primes 0 2)
-;             (array-set! primes 1 3) ...
+;             (set! primes (0 8) 2)
+;             (set! primes (1 8) 3) ...
 ```
 
 **`unroll` — loop body inlined N times, enforced by guard:**
@@ -598,10 +631,10 @@ constructor, and accessor functions:
           (struct ,name ,@(map list field size))
           (fn ,cname (,@pnames)
             (let _ptr (alloc (sizeof ,name)))
-            ,@(map (lambda (f p) `(field-set! ,sname _ptr ,f ,p)) field pnames)
+            ,@(map (lambda (f p) `(set! _ptr ,name ,f ,p)) field pnames)
             (return _ptr))
           ,@(map (lambda (aname f)
-                   `(fn ,aname (s) (return (field-get ,sname s ,f))))
+                   `(fn ,aname (s) (return (get s ,name ,f))))
                  anames field)))]))
 
 (define-struct Vec2 (x 8) (y 8))
@@ -645,12 +678,13 @@ The `block` scope means any outer `it` is simply shadowed, not renamed.
 |------|---------------|
 | `examples/hello.anc` | Hello World, `with-arena`, basic FFI |
 | `examples/fizzbuzz.anc` | Functions, `while`, conditionals, `%` |
-| `examples/array.anc` | `alloc`, `array-get/set!`, bubble sort, `for` macro |
+| `examples/array.anc` | `alloc`, `get`/`set!`, bubble sort, `for` macro |
 | `examples/linked_list.anc` | `cons`/`car`/`cdr`/`nil`/`null?`, list operations |
 | `examples/global_arena.anc` | `global-arena`, `arena-reset!`, lists escaping function scope |
-| `examples/structs.anc` | Structs, nested structs, unions, enums, array-of-structs |
+| `examples/structs.anc` | Structs, nested structs, unions, enums, `val` fields, array-of-structs |
 | `examples/macros_showcase.anc` | Full macro spectrum: `syntax-rules` → `macro-case` → macros defining macros |
 | `examples/fn_pointers.anc` | `fn-ptr`, `call-ptr`, `fn-c`, `call-ptr-c`, passing callbacks to `qsort` |
+| `examples/get_set_chains.anc` | `get`/`set!` edge cases: array-of-structs, array-of-pointers, `->` chaining, `[(val i)]` |
 
 ---
 

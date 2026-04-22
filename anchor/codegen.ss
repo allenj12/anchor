@@ -343,6 +343,84 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a) {
     [else (anchor-error "invalid type in cast" node)]))
 
 ;; ---------------------------------------------------------------------------
+;; Field-chain helper — shared by field-get and get
+;; Walks the chain (sn ptr rest) and returns a C expression string.
+;; ---------------------------------------------------------------------------
+
+(define (emit-field-chain sn ptr rest ctx pre)
+  (let loop ([sn sn] [ptr ptr] [rest rest])
+    (let ([fname (car rest)]
+          [after (cdr rest)])
+      (cond
+        ;; (val f) or (val f1 f2) — reconstruct full AnchorVal from field(s)
+        [(and (pair? fname) (eq? (id-sym (car fname)) 'val))
+         (unless (null? after)
+           (anchor-error "field-get: (val ...) must be terminal"))
+         (let* ([vargs (cdr fname)]
+                [nf    (length vargs)]
+                [_     (unless (memv nf '(1 2))
+                         (anchor-error "field-get val: 1 or 2 fields required"))]
+                [csn   (c-ident sn)]
+                [ht    (or (hashtable-ref (ctx-structs ctx) (id-sym sn) #f)
+                           (anchor-error "field-get val: unknown struct" sn))]
+                [tmp   (ctx-tmp! ctx)])
+           (if (fx= nf 1)
+               (let* ([f1n (car vargs)]
+                      [cf1 (c-ident f1n)]
+                      [e1  (or (hashtable-ref ht (id-sym f1n) #f)
+                               (anchor-error "field-get val: unknown field" f1n))]
+                      [_   (unless (fx= (cadr e1) 16)
+                             (anchor-error "field-get val: single field must be 16 bytes" f1n))])
+                 (pre-add! pre (string-append "AnchorVal " tmp ";"))
+                 (pre-add! pre (string-append "__builtin_memcpy(&" tmp ", (char*)" ptr ".ptr + ANCHOR_OFFSET_" csn "_" cf1 ", 16);"))
+                 tmp)
+               (let* ([f1n (car vargs)] [f2n (cadr vargs)]
+                      [cf1 (c-ident f1n)] [cf2 (c-ident f2n)]
+                      [e1  (or (hashtable-ref ht (id-sym f1n) #f)
+                               (anchor-error "field-get val: unknown field" f1n))]
+                      [e2  (or (hashtable-ref ht (id-sym f2n) #f)
+                               (anchor-error "field-get val: unknown field" f2n))]
+                      [_   (unless (fx= (cadr e1) 8)
+                             (anchor-error "field-get val: f1 must be 8-byte field" f1n))]
+                      [_   (unless (fx= (cadr e2) 8)
+                             (anchor-error "field-get val: f2 must be 8-byte field" f2n))])
+                 (pre-add! pre (string-append "intptr_t " tmp "_ptr = 0;"))
+                 (pre-add! pre (string-append "__builtin_memcpy(&" tmp "_ptr, (char*)" ptr ".ptr + ANCHOR_OFFSET_" csn "_" cf1 ", 8);"))
+                 (pre-add! pre (string-append "intptr_t " tmp "_sz = 0;"))
+                 (pre-add! pre (string-append "__builtin_memcpy(&" tmp "_sz, (char*)" ptr ".ptr + ANCHOR_OFFSET_" csn "_" cf2 ", 8);"))
+                 (pre-add! pre (string-append "AnchorVal " tmp " = (AnchorVal){(void*)(uintptr_t)" tmp "_ptr, (size_t)" tmp "_sz};"))
+                 tmp)))]
+        [else
+         (let* ([csn (c-ident sn)] [cfn (c-ident fname)])
+           (cond
+             [(null? after)
+              (let ([tmp (ctx-tmp! ctx)])
+                (pre-add! pre (string-append "intptr_t " tmp "_raw = 0;"))
+                (pre-add! pre (string-append "__builtin_memcpy(&" tmp "_raw, (char*)" ptr ".ptr + ANCHOR_OFFSET_" csn "_" cfn ", ANCHOR_SIZE_" csn "_" cfn ");"))
+                (pre-add! pre (string-append "AnchorVal " tmp " = anchor_int((intptr_t)" tmp "_raw);"))
+                tmp)]
+             [(eq? (id-sym (car after)) '->)
+              (when (null? (cdr after))
+                (anchor-error "field-get: expected struct type after ->"))
+              (let* ([s2n   (cadr after)]
+                     [s2_sz (struct-total-size ctx (id-sym s2n))]
+                     [tmp   (ctx-tmp! ctx)])
+                (pre-add! pre (string-append "intptr_t " tmp "_raw = 0;"))
+                (pre-add! pre (string-append "__builtin_memcpy(&" tmp "_raw, (char*)" ptr ".ptr + ANCHOR_OFFSET_" csn "_" cfn ", 8);"))
+                (pre-add! pre (string-append "AnchorVal " tmp " = (AnchorVal){(void*)(uintptr_t)" tmp "_raw, " (number->string (or s2_sz 0)) "};"))
+                (if (null? (cddr after))
+                    tmp
+                    (loop s2n tmp (cddr after))))]
+             [else
+              (let* ([s2n   (car after)]
+                     [s2_sz (struct-total-size ctx (id-sym s2n))]
+                     [tmp   (ctx-tmp! ctx)])
+                (pre-add! pre (string-append "AnchorVal " tmp " = (AnchorVal){(void*)((char*)" ptr ".ptr + ANCHOR_OFFSET_" csn "_" cfn "), " (number->string s2_sz) "};"))
+                (if (null? (cdr after))
+                    tmp
+                    (loop s2n tmp (cdr after))))]))]))))
+
+;; ---------------------------------------------------------------------------
 ;; Expression emitter — returns a C expression string; side-effects go to pre
 ;; ---------------------------------------------------------------------------
 
@@ -529,213 +607,70 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a) {
               [else
                (string-append "anchor_int((intptr_t)sizeof(" (cast-type-str arg) "))")]))]
 
-         ;; field-get — single or chained
-         ;; (field-get S ptr f)           — bare: size-based scalar/view
-         ;; (field-get S ptr f S2)        — embedded step, end: return view of f as S2
-         ;; (field-get S ptr f S2 f2 ...) — embedded step, continue to f2
-         ;; (field-get S ptr f -> S2)     — pointer step, end: return view
-         ;; (field-get S ptr f -> S2 f2 ...)  — pointer step, continue
-         ;; Ending on a struct type → view.  Ending on a field name → scalar.
-         [(eq? h 'field-get)
-          (unless (fx>= (length args) 3)
-            (anchor-error "field-get: (field-get S ptr f [-> S2 [f2 ...]])"))
-          (let loop ([sn  (car args)]
-                       [ptr (emit-expr (cadr args) ctx pre)]
-                       [rest (cddr args)])
-              (let ([fname (car rest)]
-                    [after (cdr rest)])
-                (cond
-                  ;; (val f) or (val f1 f2) — reconstruct full AnchorVal from field(s)
-                  [(and (pair? fname) (eq? (id-sym (car fname)) 'val))
-                   (unless (null? after)
-                     (anchor-error "field-get: (val ...) must be terminal"))
-                   (let* ([vargs (cdr fname)]
-                          [nf    (length vargs)]
-                          [_     (unless (memv nf '(1 2))
-                                   (anchor-error "field-get val: 1 or 2 fields required"))]
-                          [csn   (c-ident sn)]
-                          [ht    (or (hashtable-ref (ctx-structs ctx) (id-sym sn) #f)
-                                     (anchor-error "field-get val: unknown struct" sn))]
-                          [tmp   (ctx-tmp! ctx)])
-                     (if (fx= nf 1)
-                         ;; 1-field: 16-byte AnchorVal stored verbatim
-                         (let* ([f1n (car vargs)]
-                                [cf1 (c-ident f1n)]
-                                [e1  (or (hashtable-ref ht (id-sym f1n) #f)
-                                         (anchor-error "field-get val: unknown field" f1n))]
-                                [_   (unless (fx= (cadr e1) 16)
-                                       (anchor-error "field-get val: single field must be 16 bytes" f1n))])
-                           (pre-add! pre (string-append "AnchorVal " tmp ";"))
-                           (pre-add! pre (string-append "__builtin_memcpy(&" tmp ", (char*)" ptr ".ptr + ANCHOR_OFFSET_" csn "_" cf1 ", 16);"))
-                           tmp)
-                         ;; 2-field: ptr (8 bytes) + size (8 bytes)
-                         (let* ([f1n (car vargs)] [f2n (cadr vargs)]
-                                [cf1 (c-ident f1n)] [cf2 (c-ident f2n)]
-                                [e1  (or (hashtable-ref ht (id-sym f1n) #f)
-                                         (anchor-error "field-get val: unknown field" f1n))]
-                                [e2  (or (hashtable-ref ht (id-sym f2n) #f)
-                                         (anchor-error "field-get val: unknown field" f2n))]
-                                [_   (unless (fx= (cadr e1) 8)
-                                       (anchor-error "field-get val: f1 must be 8-byte field" f1n))]
-                                [_   (unless (fx= (cadr e2) 8)
-                                       (anchor-error "field-get val: f2 must be 8-byte field" f2n))])
-                           (pre-add! pre (string-append "intptr_t " tmp "_ptr = 0;"))
-                           (pre-add! pre (string-append "__builtin_memcpy(&" tmp "_ptr, (char*)" ptr ".ptr + ANCHOR_OFFSET_" csn "_" cf1 ", 8);"))
-                           (pre-add! pre (string-append "intptr_t " tmp "_sz = 0;"))
-                           (pre-add! pre (string-append "__builtin_memcpy(&" tmp "_sz, (char*)" ptr ".ptr + ANCHOR_OFFSET_" csn "_" cf2 ", 8);"))
-                           (pre-add! pre (string-append "AnchorVal " tmp " = (AnchorVal){(void*)(uintptr_t)" tmp "_ptr, (size_t)" tmp "_sz};"))
-                           tmp)))]
-                  [else
-                   (let* ([csn (c-ident sn)] [cfn (c-ident fname)])
-                     (cond
-                       [(null? after)
-                        ;; Bare single field — always scalar: ANCHOR_UNBOXED flag on the
-                        ;; AnchorVal drives interpretation, not the field size.
-                        (let ([tmp (ctx-tmp! ctx)])
-                          (pre-add! pre (string-append "intptr_t " tmp "_raw = 0;"))
-                          (pre-add! pre (string-append "__builtin_memcpy(&" tmp "_raw, (char*)" ptr ".ptr + ANCHOR_OFFSET_" csn "_" cfn ", ANCHOR_SIZE_" csn "_" cfn ");"))
-                          (pre-add! pre (string-append "AnchorVal " tmp " = anchor_int((intptr_t)" tmp "_raw);"))
-                          tmp)]
-                       [(eq? (id-sym (car after)) '->)
-                        ;; Pointer step: (f -> S2 ...)
-                        (when (null? (cdr after))
-                          (anchor-error "field-get: expected struct type after ->"))
-                        (let* ([s2n   (cadr after)]
-                               [s2_sz (struct-total-size ctx (id-sym s2n))]
-                               [tmp   (ctx-tmp! ctx)])
-                          (pre-add! pre (string-append "intptr_t " tmp "_raw = 0;"))
-                          (pre-add! pre (string-append "__builtin_memcpy(&" tmp "_raw, (char*)" ptr ".ptr + ANCHOR_OFFSET_" csn "_" cfn ", 8);"))
-                          (pre-add! pre (string-append "AnchorVal " tmp " = (AnchorVal){(void*)(uintptr_t)" tmp "_raw, " (number->string (or s2_sz 0)) "};"))
-                          (if (null? (cddr after))
-                              tmp   ;; ends with type → return view
-                              (loop s2n tmp (cddr after))))]
-                       [else
-                        ;; Embedded step: (f S2 ...)
-                        (let* ([s2n   (car after)]
-                               [s2_sz (struct-total-size ctx (id-sym s2n))]
-                               [tmp   (ctx-tmp! ctx)])
-                          (pre-add! pre (string-append "AnchorVal " tmp " = (AnchorVal){(void*)((char*)" ptr ".ptr + ANCHOR_OFFSET_" csn "_" cfn "), " (number->string s2_sz) "};"))
-                          (if (null? (cdr after))
-                              tmp   ;; ends with type → return view
-                              (loop s2n tmp (cdr after))))]))])))]
-
-         ;; array-get
-         [(eq? h 'array-get)
-          (when (fx< (length args) 2) (anchor-error "array-get: (array-get arr i [esz])"))
-          (let* ([arr (emit-expr (car args) ctx pre)]
-                 [idx (emit-expr (cadr args) ctx pre)]
-                 [esz (resolve-esz (and (fx>= (length args) 3) (caddr args)) ctx)]
-                 [tmp (ctx-tmp! ctx)])
-            (if (fx<= esz 8)
-                (begin
-                  (pre-add! pre (string-append "intptr_t " tmp "_raw = 0;"))
-                  (pre-add! pre (string-append "__builtin_memcpy(&" tmp "_raw, (char*)" arr ".ptr + _ANCH_IVAL(" idx ") * " (number->string esz) ", " (number->string esz) ");"))
-                  (pre-add! pre (string-append "AnchorVal " tmp " = anchor_int(" tmp "_raw);")))
-                (begin
-                  (pre-add! pre (string-append "AnchorVal " tmp " = anchor_alloc(" (number->string esz) ");"))
-                  (pre-add! pre (string-append "__builtin_memcpy(" tmp ".ptr, (char*)" arr ".ptr + _ANCH_IVAL(" idx ") * " (number->string esz) ", " (number->string esz) ");"))))
-            tmp)]
-
-         ;; array-set! as expression
-         [(eq? h 'array-set!)
-          (when (fx< (length args) 3) (anchor-error "array-set!: (array-set! arr i val [esz])"))
-          (let* ([arr (emit-expr (car args) ctx pre)]
-                 [idx (emit-expr (cadr args) ctx pre)]
-                 [val (emit-expr (caddr args) ctx pre)]
-                 [esz (resolve-esz (and (fx>= (length args) 4) (cadddr args)) ctx)])
-            (if (fx<= esz 8)
-                (let ([tmp (ctx-tmp! ctx)])
-                  (pre-add! pre (string-append "intptr_t " tmp "_ival = _ANCH_IVAL(" val ");"))
-                  (pre-add! pre (string-append "__builtin_memcpy((char*)" arr ".ptr + _ANCH_IVAL(" idx ") * " (number->string esz) ", &" tmp "_ival, " (number->string esz) ");")))
-                (pre-add! pre (string-append "__builtin_memcpy((char*)" arr ".ptr + _ANCH_IVAL(" idx ") * " (number->string esz) ", " val ".ptr, " (number->string esz) ");")))
-            val)]
-
-         ;; field-set! as expression — single or chained
-         ;; (field-set! S ptr f val)                — single field
-         ;; (field-set! S ptr f S2 f2 ... val)      — navigate embedded chain, set last field
-         ;; (field-set! S ptr f -> S2 f2 ... val)   — follow pointer, then set last field
-         [(eq? h 'field-set!)
-          (unless (fx>= (length args) 4)
-            (anchor-error "field-set!: (field-set! S ptr f [-> S2 f2 ...] val)"))
-          (let* ([chain    (cddr args)]              ;; (f [-> S2 f2 ...] val)
-                 [val      (emit-expr (car (last-pair chain)) ctx pre)]
-                 [fields   (reverse (cdr (reverse chain)))]  ;; drop last (val)
-                 ;; Navigate to the innermost struct, returning (final-sn . ptr)
-                 [inner-ptr
-                  (let loop ([sn  (car args)]
-                             [ptr (emit-expr (cadr args) ctx pre)]
-                             [rest fields])
-                    (if (null? (cdr rest))
-                        (cons sn ptr)
-                        (let* ([fname (car rest)]
-                               [csn   (c-ident sn)] [cfn (c-ident fname)]
-                               [tmp   (ctx-tmp! ctx)])
-                          (cond
-                            [(eq? (id-sym (cadr rest)) '->)
-                             ;; pointer step: (f -> S2 f2 ...)
-                             (when (fx< (length (cdr rest)) 3)
-                               (anchor-error "field-set!: expected (-> S2 f2) after field"))
-                             (let* ([s2n   (caddr rest)]
-                                    [s2_sz (struct-total-size ctx (id-sym s2n))])
-                               (pre-add! pre (string-append "intptr_t " tmp "_raw = 0;"))
-                               (pre-add! pre (string-append "__builtin_memcpy(&" tmp "_raw, (char*)" ptr ".ptr + ANCHOR_OFFSET_" csn "_" cfn ", 8);"))
-                               (pre-add! pre (string-append "AnchorVal " tmp " = (AnchorVal){(void*)(uintptr_t)" tmp "_raw, " (number->string (or s2_sz 0)) "};"))
-                               (loop s2n tmp (cdddr rest)))]
-                            [else
-                             ;; embedded step: (f S2 f2 ...)
-                             (let* ([s2n   (cadr rest)]
-                                    [s2_sz (struct-total-size ctx (id-sym s2n))])
-                               (pre-add! pre (string-append "AnchorVal " tmp " = (AnchorVal){(void*)((char*)" ptr ".ptr + ANCHOR_OFFSET_" csn "_" cfn "), " (number->string s2_sz) "};"))
-                               (loop s2n tmp (cddr rest)))]))))]
-                 [sn    (car inner-ptr)]
-                 [ptr   (cdr inner-ptr)]
-                 [fname (car (last-pair fields))]
-                 [csn   (c-ident sn)]
-                 [tmp   (ctx-tmp! ctx)])
-            (if (and (pair? fname) (eq? (id-sym (car fname)) 'val))
-                ;; (val ...) terminal — store AnchorVal halves without UNBOXED check
-                (let* ([vargs (cdr fname)]
-                       [nf    (length vargs)]
-                       [_     (unless (memv nf '(1 2))
-                                (anchor-error "field-set! val: 1 or 2 fields required"))]
-                       [ht    (or (hashtable-ref (ctx-structs ctx) (id-sym sn) #f)
-                                  (anchor-error "field-set! val: unknown struct" sn))])
-                  (pre-add! pre (string-append "AnchorVal " tmp " = " val ";"))
-                  (if (fx= nf 1)
-                      ;; 1-field 16-byte: store full AnchorVal verbatim
-                      (let* ([f1n (car vargs)]
-                             [cf1 (c-ident f1n)]
-                             [e1  (or (hashtable-ref ht (id-sym f1n) #f)
-                                      (anchor-error "field-set! val: unknown field" f1n))]
-                             [_   (unless (fx= (cadr e1) 16)
-                                    (anchor-error "field-set! val: single field must be 16 bytes" f1n))])
-                        (pre-add! pre (string-append "__builtin_memcpy((char*)" ptr ".ptr + ANCHOR_OFFSET_" csn "_" cf1 ", &" tmp ", 16);")))
-                      ;; 2-field: ptr → f1 (8 bytes), size → f2 (8 bytes)
-                      (let* ([f1n (car vargs)] [f2n (cadr vargs)]
-                             [cf1 (c-ident f1n)] [cf2 (c-ident f2n)]
-                             [e1  (or (hashtable-ref ht (id-sym f1n) #f)
-                                      (anchor-error "field-set! val: unknown field" f1n))]
-                             [e2  (or (hashtable-ref ht (id-sym f2n) #f)
-                                      (anchor-error "field-set! val: unknown field" f2n))]
-                             [_   (unless (fx= (cadr e1) 8)
-                                    (anchor-error "field-set! val: f1 must be 8-byte field" f1n))]
-                             [_   (unless (fx= (cadr e2) 8)
-                                    (anchor-error "field-set! val: f2 must be 8-byte field" f2n))])
-                        (pre-add! pre (string-append "intptr_t " tmp "_addr = (intptr_t)" tmp ".ptr;"))
-                        (pre-add! pre (string-append "__builtin_memcpy((char*)" ptr ".ptr + ANCHOR_OFFSET_" csn "_" cf1 ", &" tmp "_addr, 8);"))
-                        (pre-add! pre (string-append "__builtin_memcpy((char*)" ptr ".ptr + ANCHOR_OFFSET_" csn "_" cf2 ", &" tmp ".size, 8);"))))
-                  tmp)
-                ;; normal field — UNBOXED/BOXED dispatch
-                (let ([cfn (c-ident fname)])
-                  (pre-add! pre (string-append "AnchorVal " tmp " = " val ";"))
-                  (pre-add! pre (string-append "if (_ANCH_IS_UNBOXED(" tmp ")) {"))
-                  (pre-add! pre (string-append "    intptr_t " tmp "_ival = _ANCH_IVAL(" tmp ");"))
-                  (pre-add! pre (string-append "    __builtin_memcpy((char*)" ptr ".ptr + ANCHOR_OFFSET_" csn "_" cfn ", &" tmp "_ival, ANCHOR_SIZE_" csn "_" cfn ");"))
-                  (pre-add! pre "} else {")
-                  (pre-add! pre (string-append "    intptr_t " tmp "_addr = (intptr_t)" tmp ".ptr;"))
-                  (pre-add! pre (string-append "    __builtin_memcpy((char*)" ptr ".ptr + ANCHOR_OFFSET_" csn "_" cfn ", &" tmp "_addr, ANCHOR_SIZE_" csn "_" cfn ");"))
-                  (pre-add! pre "}")
-                  tmp)))]
+         ;; get — unified access form (ptr first)
+         ;; (get ptr Type field ...)              — named chain (ptr before type)
+         ;; (get ptr [i esz])                     — terminal indexed: scalar
+         ;; (get ptr [i esz] Type field ...)      — indexed step then named chain
+         [(eq? h 'get)
+          (unless (fx>= (length args) 2)
+            (anchor-error "get: (get ptr [i esz]) or (get ptr Type field ...)"))
+          (let* ([ptr-e  (emit-expr (car args) ctx pre)]
+                 [second (cadr args)]
+                 [rest   (cddr args)])
+            (cond
+              ;; [(val i)] — fat pointer element: read full AnchorVal from slot i
+              ;; parses as ((val i)) — one-element list wrapping (val i)
+              [(and (pair? second) (null? (cdr second))
+                    (pair? (car second)) (eq? (id-sym (caar second)) 'val))
+               (let* ([idx  (emit-expr (cadar second) ctx pre)]
+                      [tmp  (ctx-tmp! ctx)])
+                 (pre-add! pre (string-append "AnchorVal " tmp ";"))
+                 (pre-add! pre (string-append "__builtin_memcpy(&" tmp ", (char*)" ptr-e ".ptr + _ANCH_IVAL(" idx ") * sizeof(AnchorVal), sizeof(AnchorVal));"))
+                 (if (null? rest)
+                     tmp
+                     (emit-field-chain (car rest) tmp (cdr rest) ctx pre)))]
+              ;; indexed first step: second arg is a list but not (val ...)
+              [(and (pair? second) (not (eq? (id-sym (car second)) 'val)))
+               (let* ([idx   (emit-expr (car second) ctx pre)]
+                      [esz-e (if (pair? (cdr second))
+                                 (emit-expr (cadr second) ctx pre)
+                                 "anchor_int(8)")]
+                      [tmp   (ctx-tmp! ctx)])
+                 (if (null? rest)
+                     ;; terminal: scalar read — use (val ...) for fat pointer fields
+                     (begin
+                       (pre-add! pre (string-append "intptr_t " tmp "_raw = 0;"))
+                       (pre-add! pre (string-append "__builtin_memcpy(&" tmp "_raw, (char*)" ptr-e ".ptr + _ANCH_IVAL(" idx ") * _ANCH_IVAL(" esz-e "), _ANCH_IVAL(" esz-e "));"))
+                       (pre-add! pre (string-append "AnchorVal " tmp " = anchor_int(" tmp "_raw);")))
+                     ;; non-terminal: advance pointer for chain continuation
+                     (pre-add! pre (string-append "AnchorVal " tmp " = (AnchorVal){(void*)((char*)" ptr-e ".ptr + _ANCH_IVAL(" idx ") * _ANCH_IVAL(" esz-e ")), (size_t)_ANCH_IVAL(" esz-e ")};")))
+                 (if (null? rest)
+                     tmp
+                     ;; type terminal: (get arr [i esz] Type) — fat ptr with sizeof(Type)
+                     (if (and (null? (cdr rest))
+                              (sym? (car rest))
+                              (hashtable-ref (ctx-structs ctx) (id-sym (car rest)) #f))
+                         (let* ([sz   (struct-total-size ctx (id-sym (car rest)))]
+                                [ptmp (ctx-tmp! ctx)])
+                           (pre-add! pre (string-append "AnchorVal " ptmp " = (AnchorVal){" tmp ".ptr, " (number->string sz) "};"))
+                           ptmp)
+                         ;; pointer-follow after indexed step: (get arr [i esz] -> Type ...)
+                         (if (and (sym? (car rest)) (eq? (id-sym (car rest)) '->))
+                             (let* ([type-name (cadr rest)]
+                                    [sz        (struct-total-size ctx (id-sym type-name))]
+                                    [ptmp      (ctx-tmp! ctx)])
+                               (pre-add! pre (string-append "intptr_t " ptmp "_raw = 0;"))
+                               (pre-add! pre (string-append "__builtin_memcpy(&" ptmp "_raw, " tmp ".ptr, 8);"))
+                               (pre-add! pre (string-append "AnchorVal " ptmp " = (AnchorVal){(void*)(uintptr_t)" ptmp "_raw, " (number->string sz) "};"))
+                               (if (null? (cddr rest))
+                                   ptmp
+                                   (emit-field-chain type-name ptmp (cddr rest) ctx pre)))
+                             (emit-field-chain (car rest) tmp (cdr rest) ctx pre)))))]
+              ;; named first step: (get ptr Type field ...)
+              [else
+               (unless (fx>= (length args) 3)
+                 (anchor-error "get: (get ptr Type field ...) requires a field name"))
+               (emit-field-chain second ptr-e rest ctx pre)]))]
 
          ;; ref / deref / ptr-add
          [(eq? h 'ref)
@@ -971,23 +906,61 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a) {
 
           ;; set!
           [(eq? h 'set!)
-           (unless (fx= (length args) 2) (anchor-error "set!: (set! place expr)"))
-           (let* ([place (car args)]
-                  [pre   (make-pre)]
-                  [rhs   (emit-expr (cadr args) ctx pre)])
-             (pre-emit! pre ctx)
+           (let ([n (length args)])
              (cond
-               [(sym? place)
-                (ctx-emit! ctx (string-append (c-ident place) " = " rhs ";"))]
-               [(and (pair? place) (eq? (id-sym (car place)) 'field-get))
-                (let* ([pa  (cdr place)]
-                       [pre2 (make-pre)]
-                       [ptr (emit-expr (cadr pa) ctx pre2)]
-                       [csn (c-ident (car pa))]
-                       [cfn (c-ident (caddr pa))])
-                  (pre-emit! pre2 ctx)
-                  (ctx-emit! ctx (string-append "__builtin_memcpy((char*)" ptr ".ptr + ANCHOR_OFFSET_" csn "_" cfn ", " rhs ".ptr, ANCHOR_SIZE_" csn "_" cfn ");")))]
-               [else (anchor-error "set!: unsupported place" place)]))]
+               ;; (set! name val) — variable rebind
+               [(and (fx= n 2) (sym? (car args)))
+                (let* ([pre (make-pre)]
+                       [rhs (emit-expr (cadr args) ctx pre)])
+                  (pre-emit! pre ctx)
+                  (ctx-emit! ctx (string-append (c-ident (car args)) " = " rhs ";")))]
+               ;; (set! ptr [(val i)] expr) — write full AnchorVal to slot i
+               ;; [(val i)] parses as ((val i)) — one-element list wrapping (val i)
+               [(and (fx= n 3) (pair? (cadr args)) (null? (cdr (cadr args)))
+                     (pair? (caar (cdr args))) (eq? (id-sym (caar (cadr args))) 'val))
+                (let* ([pre   (make-pre)]
+                       [ptr-e (emit-expr (car args) ctx pre)]
+                       [idx   (emit-expr (cadar (cadr args)) ctx pre)]
+                       [val-e (emit-expr (caddr args) ctx pre)]
+                       [tmp   (ctx-tmp! ctx)])
+                  (pre-emit! pre ctx)
+                  (ctx-emit! ctx (string-append "{ AnchorVal " tmp " = " val-e "; __builtin_memcpy((char*)" ptr-e ".ptr + _ANCH_IVAL(" idx ") * sizeof(AnchorVal), &" tmp ", sizeof(AnchorVal)); }")))]
+               ;; (set! ptr [i esz] ...) — indexed step (any args after)
+               [(and (fx>= n 3) (pair? (cadr args)) (not (eq? (id-sym (caadr args)) 'val)))
+                (let* ([step  (cadr args)]
+                       [rest  (cddr args)]
+                       [pre   (make-pre)]
+                       [ptr-e (emit-expr (car args) ctx pre)]
+                       [idx-e (emit-expr (car step) ctx pre)]
+                       [esz-e (if (pair? (cdr step))
+                                  (emit-expr (cadr step) ctx pre)
+                                  "anchor_int(8)")]
+                       [tmp   (ctx-tmp! ctx)])
+                  (pre-emit! pre ctx)
+                  (if (fx= (length rest) 1)
+                      ;; (set! ptr [i esz] val) — pure array write via runtime stride
+                      (let* ([pre2  (make-pre)]
+                             [val-e (emit-expr (car rest) ctx pre2)])
+                        (pre-emit! pre2 ctx)
+                        (ctx-emit! ctx (string-append "{ intptr_t " tmp "_ival = _ANCH_IVAL(" val-e "); __builtin_memcpy((char*)" ptr-e ".ptr + _ANCH_IVAL(" idx-e ") * _ANCH_IVAL(" esz-e "), &" tmp "_ival, _ANCH_IVAL(" esz-e ")); }")))
+                      ;; (set! ptr [i esz] Type-or--> field ... val) — indexed then chain
+                      (begin
+                        (ctx-emit! ctx (string-append "AnchorVal " tmp " = (AnchorVal){(void*)((char*)" ptr-e ".ptr + _ANCH_IVAL(" idx-e ") * _ANCH_IVAL(" esz-e ")), (size_t)_ANCH_IVAL(" esz-e ")};"))
+                        (if (and (sym? (car rest)) (eq? (id-sym (car rest)) '->))
+                            ;; pointer-follow: (set! arr [i esz] -> Type field ... val)
+                            (let* ([type-name (cadr rest)]
+                                   [sz        (struct-total-size ctx (id-sym type-name))]
+                                   [ptmp      (ctx-tmp! ctx)])
+                              (ctx-emit! ctx (string-append "intptr_t " ptmp "_raw = 0;"))
+                              (ctx-emit! ctx (string-append "__builtin_memcpy(&" ptmp "_raw, " tmp ".ptr, 8);"))
+                              (ctx-emit! ctx (string-append "AnchorVal " ptmp " = (AnchorVal){(void*)(uintptr_t)" ptmp "_raw, " (number->string sz) "};"))
+                              (emit-stmt `(field-set! ,type-name ,(string->symbol ptmp) ,@(cddr rest)) ctx))
+                            (emit-stmt `(field-set! ,(car rest) ,(string->symbol tmp) ,@(cdr rest)) ctx)))))]
+               ;; (set! ptr Type field ... val) — named field chain write
+               [(fx>= n 4)
+                (emit-stmt `(field-set! ,(cadr args) ,(car args) ,@(cddr args)) ctx)]
+               [else
+                (anchor-error "set!: (set! name val) | (set! ptr [i esz] val) | (set! ptr Type field ... val)")]))]
 
           ;; return
           [(eq? h 'return)
@@ -1094,22 +1067,7 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a) {
            (ctx-dedent! ctx)
            (ctx-emit! ctx "}")]
 
-          ;; array-set! as statement
-          [(eq? h 'array-set!)
-           (when (fx< (length args) 3) (anchor-error "array-set!: need at least 3 args"))
-           (let* ([pre (make-pre)]
-                  [arr (emit-expr (car args) ctx pre)]
-                  [idx (emit-expr (cadr args) ctx pre)]
-                  [val (emit-expr (caddr args) ctx pre)]
-                  [esz (resolve-esz (and (fx>= (length args) 4) (cadddr args)) ctx)])
-             (pre-emit! pre ctx)
-             (if (fx<= esz 8)
-                 (let ([tmp (ctx-tmp! ctx)])
-                   (ctx-emit! ctx (string-append "intptr_t " tmp "_ival = _ANCH_IVAL(" val ");"))
-                   (ctx-emit! ctx (string-append "__builtin_memcpy((char*)" arr ".ptr + _ANCH_IVAL(" idx ") * " (number->string esz) ", &" tmp "_ival, " (number->string esz) ");")))
-                 (ctx-emit! ctx (string-append "__builtin_memcpy((char*)" arr ".ptr + _ANCH_IVAL(" idx ") * " (number->string esz) ", " val ".ptr, " (number->string esz) ");"))))]
-
-          ;; field-set! as statement — single or chained
+          ;; field-set! as statement — internal, used by set! — single or chained
           ;; (field-set! S ptr f val)               — single field
           ;; (field-set! S ptr f S2 f2 ... val)     — navigate embedded chain, set last field
           ;; (field-set! S ptr f -> S2 f2 ... val)  — follow pointer, then set last field

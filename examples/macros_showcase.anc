@@ -99,7 +99,7 @@
 ;
 ;    Allocates exactly (N+1)*8 bytes on the arena at expansion time —
 ;    the size is a compile-time constant, not a runtime multiply.
-;    Then emits one array-set! per value with literal indices.
+;    Then emits one set! per value with literal indices.
 ;
 ;    This cannot be written as syntax-rules because length/map/iota
 ;    must run at expansion time; syntax-rules templates are pure substitution.
@@ -114,7 +114,7 @@
           (let ,name (alloc ,size))
           ,@(let loop ([i 0] [vs val])
               (if (null? vs) '()
-                  (cons `(array-set! ,name ,i ,(car vs))
+                  (cons `(set! ,name (,i 8) ,(car vs))
                         (loop (+ i 1) (cdr vs)))))))]))
 
 ; ---------------------------------------------------------------------------
@@ -181,9 +181,9 @@
              (struct name (field size) ...)
              (fn make-name (pname ...)
                (let _ptr (alloc (sizeof name)))
-               (field-set! name _ptr field pname) ...
+               (set! _ptr name field pname) ...
                (return _ptr))
-             (fn aname (s) (return (field-get name s field))) ...)))]))
+             (fn aname (s) (return (get s name field))) ...)))]))
 
 ; ---------------------------------------------------------------------------
 ; 6. macro-case with guard: unroll
@@ -303,12 +303,12 @@
     ; --- arena-array: size computed at expansion time ---
     ; (arena-array primes 2 3 5 7 11 13)
     ; expands to: (let primes (alloc 48))   ; 6*8, a literal
-    ;             (array-set! primes 0 2)
+    ;             (set! primes (0 8) 2)
     ;             ...
     (arena-array primes 2 3 5 7 11 13)
     (printf "primes:")
     (for i 0 to 6
-      (printf " %d" (cast int (array-get primes i))))
+      (printf " %d" (cast int (get primes [i 8]))))
     (printf "\n")
 
     ; --- unroll: loop body repeated inline, no branch overhead ---

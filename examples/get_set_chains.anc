@@ -1,0 +1,151 @@
+; get_set_chains.anc — edge cases for get/set! chains
+; Tests:
+;   1. array of structs via [i stride] + named chain
+;   2. array of pointers with -> chain (get and set!)
+;   3. indexed type terminal — (get arr [i stride] Type) fat pointer
+;   4. multi-hop -> from array
+;   5. embedded struct fat-pointer terminal (type as last named step)
+;   6. val in a struct inside an array
+
+(include <stdio.h>)
+(ffi printf (const char* ...) -> int)
+
+(struct Point (x 8) (y 8))
+
+; Node: 8-byte value + 8-byte next pointer
+(struct Node (val 8) (nxt 8))
+
+; Holder: stores a fat pointer across a struct boundary
+(struct Holder (buf 16))
+
+; ---------------------------------------------------------------------------
+; 1. Array of structs via [i stride] — one-step read
+; ---------------------------------------------------------------------------
+
+(fn test-array-of-structs ()
+  (let n 3)
+  (let stride (sizeof Point))
+  (let arr (alloc (* n stride)))
+  ; write via [i stride] then named chain
+  (set! arr [0 stride] Point x 10)
+  (set! arr [0 stride] Point y 20)
+  (set! arr [1 stride] Point x 30)
+  (set! arr [1 stride] Point y 40)
+  (set! arr [2 stride] Point x 50)
+  (set! arr [2 stride] Point y 60)
+  ; read back
+  (printf "pts[0]=(%d,%d) pts[1]=(%d,%d) pts[2]=(%d,%d)\n"
+    (cast int (get arr [0 stride] Point x))
+    (cast int (get arr [0 stride] Point y))
+    (cast int (get arr [1 stride] Point x))
+    (cast int (get arr [1 stride] Point y))
+    (cast int (get arr [2 stride] Point x))
+    (cast int (get arr [2 stride] Point y))))
+
+; ---------------------------------------------------------------------------
+; 2. Array of pointers — store heap pointers, follow with ->
+; ---------------------------------------------------------------------------
+
+(fn test-array-of-pointers ()
+  (let p0 (alloc (sizeof Point)))
+  (let p1 (alloc (sizeof Point)))
+  (set! p0 Point x 111)  (set! p0 Point y 222)
+  (set! p1 Point x 333)  (set! p1 Point y 444)
+  (let arr (alloc (* 2 8)))
+  (set! arr [0 8] p0)
+  (set! arr [1 8] p1)
+  ; single-form: index then follow pointer then field
+  (printf "ptrs[0]=(%d,%d) ptrs[1]=(%d,%d)\n"
+    (cast int (get arr [0 8] -> Point x))
+    (cast int (get arr [0 8] -> Point y))
+    (cast int (get arr [1 8] -> Point x))
+    (cast int (get arr [1 8] -> Point y))))
+
+; ---------------------------------------------------------------------------
+; 3. Indexed type terminal — (get arr [i stride] Type) returns fat pointer
+;    with sizeof(Type); set! through -> after indexed step
+; ---------------------------------------------------------------------------
+
+(fn test-indexed-type-terminal ()
+  (let stride (sizeof Point))
+  (let arr (alloc (* 2 stride)))
+  (set! arr [0 stride] Point x 10)
+  (set! arr [0 stride] Point y 20)
+  (set! arr [1 stride] Point x 30)
+  (set! arr [1 stride] Point y 40)
+  ; get element as fat pointer, then access fields through it
+  (let p0 (get arr [0 stride] Point))
+  (let p1 (get arr [1 stride] Point))
+  (printf "p0 byte-size=%d x=%d  p1 byte-size=%d x=%d\n"
+    (cast int (byte-size p0)) (cast int (get p0 Point x))
+    (cast int (byte-size p1)) (cast int (get p1 Point x))))
+
+(fn test-set-through-ptr-array ()
+  (let p (alloc (sizeof Point)))
+  (set! p Point x 0)  (set! p Point y 0)
+  (let arr (alloc (* 2 8)))
+  (set! arr [0 8] p)
+  ; write through the stored pointer in one form
+  (set! arr [0 8] -> Point x 99)
+  (set! arr [0 8] -> Point y 88)
+  (printf "after set! through ptr: x=%d y=%d\n"
+    (cast int (get p Point x))
+    (cast int (get p Point y))))
+
+; ---------------------------------------------------------------------------
+; 4. Multi-hop -> from array — follow two pointer hops in one get
+; ---------------------------------------------------------------------------
+
+(fn test-multi-hop ()
+  (let n1 (alloc (sizeof Node)))
+  (let n2 (alloc (sizeof Node)))
+  (set! n1 Node val 11)  (set! n1 Node nxt n2)
+  (set! n2 Node val 22)  (set! n2 Node nxt 0)
+  (let arr (alloc (* 1 8)))
+  (set! arr [0 8] n1)
+  (let v (get arr [0 8] -> Node nxt -> Node val))
+  (printf "multi-hop val=%d\n" (cast int v)))
+
+; ---------------------------------------------------------------------------
+; 5. Embedded struct fat-pointer terminal — stop at type name in named chain
+;    (get ptr Type field Type2) returns {ptr+offset, sizeof(Type2)}
+; ---------------------------------------------------------------------------
+
+(fn test-embedded-ptr-terminal ()
+  ; AABB-like: outer struct embedding a Point
+  (struct Outer (inner (sizeof Point)) (tag 8))
+  (let o (alloc (+ (sizeof Point) 8)))
+  (set! o Outer inner Point x 77)
+  (set! o Outer inner Point y 88)
+  ; get the embedded Point as a fat pointer
+  (let p (get o Outer inner Point))
+  (printf "embedded ptr: byte-size=%d x=%d\n"
+    (cast int (byte-size p))
+    (cast int (get p Point x))))
+
+; ---------------------------------------------------------------------------
+; 6. Val in a struct inside an array — store and recover fat pointer size
+; ---------------------------------------------------------------------------
+
+(fn test-val-in-struct-array ()
+  (let buf (alloc (* 7 8)))   ; size = 56
+  (let arr (alloc (* 2 (sizeof Holder))))
+  (set! arr [0 (sizeof Holder)] Holder (val buf) buf)
+  (let v (get arr [0 (sizeof Holder)] Holder (val buf)))
+  (printf "recovered byte-size=%d\n" (cast int (byte-size v))))
+
+(with-arena
+  (fn main ()
+    (printf "--- array of structs ---\n")
+    (test-array-of-structs)
+    (printf "--- array of pointers ---\n")
+    (test-array-of-pointers)
+    (printf "--- indexed type terminal + set! through ptr ---\n")
+    (test-indexed-type-terminal)
+    (test-set-through-ptr-array)
+    (printf "--- multi-hop -> from array ---\n")
+    (test-multi-hop)
+    (printf "--- embedded ptr terminal ---\n")
+    (test-embedded-ptr-terminal)
+    (printf "--- val in struct array ---\n")
+    (test-val-in-struct-array)))

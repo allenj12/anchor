@@ -17,7 +17,7 @@
   (let lst nil)
   (let i (- n 1))
   (while (>= i 0)
-    (set! lst (cons (array-get arr i 8) lst))
+    (set! lst (cons (get arr [i 8]) lst))
     (set! i (- i 1)))
   (return lst))
 
@@ -102,8 +102,8 @@
 
     ; Build from array
     (let arr (alloc (* 6 8)))
-    (array-set! arr 0 10 8) (array-set! arr 1 20 8) (array-set! arr 2 30 8)
-    (array-set! arr 3 40 8) (array-set! arr 4 50 8) (array-set! arr 5 60 8)
+    (set! arr [0 8] 10) (set! arr [1 8] 20) (set! arr [2 8] 30)
+    (set! arr [3 8] 40) (set! arr [4 8] 50) (set! arr [5 8] 60)
     (let from-arr (list-from-arr arr 6))
     (printf "from arr: ")
     (print-list from-arr)
