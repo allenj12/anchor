@@ -328,9 +328,7 @@ Fields default to 8 bytes. Specify smaller sizes explicitly (e.g. 4 for `int`,
 (let px (field-get Point p x))   ; → anchor_int(100)
 ```
 
-Nest structs inline using `(sizeof Name)` as the field size. `field-get` on an
-embedded field returns a sub-struct pointer, not a scalar — use a second `field-get` to
-reach the inner value:
+Nest structs inline using `(sizeof Name)` as the field size. Chain `field-get` and `field-set!` to navigate nested structs in one call — no intermediate variable needed. Use `->` to follow a stored pointer instead of navigating into inline bytes:
 
 ```anchor
 (struct AABB
@@ -338,12 +336,17 @@ reach the inner value:
   (max (sizeof Point)))
 
 (let b (alloc (sizeof AABB)))
-(let mn (field-get AABB b min))   ; pointer into AABB at offset of 'min'
-(field-set! Point mn x 0)
-(field-set! Point mn y 0)
-(let mx (field-get AABB b max))
-(field-set! Point mx x 800)
-(field-set! Point mx y 600)
+
+;; chained — embedded: navigate into inline Point bytes
+(field-set! AABB b min Point x 0)
+(field-set! AABB b min Point y 0)
+(field-set! AABB b max Point x 800)
+(field-set! AABB b max Point y 600)
+(let x0 (field-get AABB b min Point x))
+
+;; pointer field — node.next stores an address to another Node
+;; (struct Node (val 8) (next 8))
+(field-get Node n next -> Node val)   ; -> signals pointer dereference
 ```
 
 Array of structs — step by `sizeof`:
@@ -357,6 +360,23 @@ Array of structs — step by `sizeof`:
   (field-get Point p x)
   (set! i (+ i 1)))
 ```
+
+**Storing fat pointers in struct fields.** When you store a pointer into a field, only the address is kept — `byte-size` on the recovered value falls back to the compile-time type size. To preserve the runtime size (e.g. for a dynamic array), use `(val ...)` as the final field specifier:
+
+```anchor
+;; 1-field: 16-byte field stores the full AnchorVal (ptr + size) verbatim
+(struct Slot (buf 16))
+(field-set! Slot s (val buf) data)        ; store
+(let v (field-get Slot s (val buf)))      ; recover — byte-size works
+
+;; 2-field: split across two 8-byte fields (also individually accessible)
+(struct DynArray (data 8) (len 8))
+(field-set! DynArray arr (val data len) buf)
+(let v (field-get DynArray arr (val data len)))
+(printf "elements: %d\n" (cast int (/ (byte-size v) (sizeof Elem))))
+```
+
+The retrieved value is a fully boxed `AnchorVal` — `byte-size`, pointer arithmetic, and all Anchor operations work on it normally.
 
 ### Unions
 

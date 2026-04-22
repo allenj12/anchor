@@ -33,23 +33,17 @@
 
 (fn make-aabb (x0 y0 x1 y1)
   (let b (alloc (sizeof AABB)))
-  (let mn (field-get AABB b min))   ; pointer-to-sub-struct
-  (let mx (field-get AABB b max))
-  (field-set! Point mn x x0)
-  (field-set! Point mn y y0)
-  (field-set! Point mx x x1)
-  (field-set! Point mx y y1)
+  (field-set! AABB b min Point x x0)
+  (field-set! AABB b min Point y y0)
+  (field-set! AABB b max Point x x1)
+  (field-set! AABB b max Point y y1)
   (return b))
 
 (fn aabb-width (b)
-  (let mn (field-get AABB b min))
-  (let mx (field-get AABB b max))
-  (return (- (field-get Point mx x) (field-get Point mn x))))
+  (return (- (field-get AABB b max Point x) (field-get AABB b min Point x))))
 
 (fn aabb-height (b)
-  (let mn (field-get AABB b min))
-  (let mx (field-get AABB b max))
-  (return (- (field-get Point mx y) (field-get Point mn y))))
+  (return (- (field-get AABB b max Point y) (field-get AABB b min Point y))))
 
 ; ---------------------------------------------------------------------------
 ; Union — same bytes, two interpretations
@@ -83,6 +77,35 @@
   (if (== d (c-const Direction_East))  (printf "East\n")
   (if (== d (c-const Direction_South)) (printf "South\n")
     (printf "West\n")))))
+
+; ---------------------------------------------------------------------------
+; Dynamic slice — store a fat pointer (ptr + byte-size) in a struct field
+; ---------------------------------------------------------------------------
+
+; Two patterns for preserving byte-size across a field boundary:
+;
+;   (val f)      — 16-byte field stores the full AnchorVal verbatim
+;   (val f1 f2)  — two 8-byte fields store ptr and size separately
+;                  (individually accessible, same round-trip guarantee)
+
+(struct Slice
+  (buf 16))   ; holds a complete AnchorVal — ptr and size both intact
+
+(struct Split
+  (data 8)
+  (len  8))   ; pointer in data, byte-size in len — individually readable too
+
+(fn make-slice (n)
+  ; allocate n 8-byte slots and wrap in a Slice
+  (let buf (alloc (* n 8)))
+  (let s (alloc (sizeof Slice)))
+  (field-set! Slice s (val buf) buf)
+  (return s))
+
+(fn slice-len (s)
+  ; recover full AnchorVal and divide by element size
+  (let v (field-get Slice s (val buf)))
+  (return (/ (byte-size v) 8)))
 
 ; ---------------------------------------------------------------------------
 ; Array of structs — N points, stride = sizeof Point
@@ -129,6 +152,17 @@
     (direction-name (c-const Direction_North))
     (printf "directions: ")
     (direction-name (c-const Direction_West))
+
+    ; fat pointer fields — (val ...) preserves byte-size across a struct boundary
+    (let sl (make-slice 6))
+    (printf "slice len: %d\n" (cast int (slice-len sl)))
+
+    ; split variant: store buf in two separate 8-byte fields
+    (let sp (alloc (sizeof Split)))
+    (let raw (alloc (* 3 8)))
+    (field-set! Split sp (val data len) raw)
+    (let sv (field-get Split sp (val data len)))
+    (printf "split byte-size: %d\n" (cast int (byte-size sv)))
 
     ; array of structs
     (let n 4)
