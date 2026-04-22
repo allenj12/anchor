@@ -114,7 +114,7 @@
           (let ,name (alloc ,size))
           ,@(let loop ([i 0] [vs val])
               (if (null? vs) '()
-                  (cons `(set! ,name (,i 8) ,(car vs))
+                  (cons `(set! ,name ,(* i 8) ,(car vs))
                         (loop (+ i 1) (cdr vs)))))))]))
 
 ; ---------------------------------------------------------------------------
@@ -303,12 +303,12 @@
     ; --- arena-array: size computed at expansion time ---
     ; (arena-array primes 2 3 5 7 11 13)
     ; expands to: (let primes (alloc 48))   ; 6*8, a literal
-    ;             (set! primes (0 8) 2)
+    ;             (set! primes 0 2)
     ;             ...
     (arena-array primes 2 3 5 7 11 13)
     (printf "primes:")
     (for i 0 to 6
-      (printf " %d" (cast int (get primes [i 8]))))
+      (printf " %d" (cast int (get primes (* i 8)))))
     (printf "\n")
 
     ; --- unroll: loop body repeated inline, no branch overhead ---

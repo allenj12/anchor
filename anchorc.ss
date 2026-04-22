@@ -164,7 +164,7 @@
              (write-c-file c-src c-path)
              (when bin-path
                (let* ([flags (if (string=? cflags "") "" (string-append " " cflags))]
-                      [cmd (string-append cc " " c-path
+                      [cmd (string-append cc " -O2 " c-path
                                          flags
                                          " -o " bin-path)])
                  (display (string-append "anchorc: cc " c-path " -o " bin-path "\n"))

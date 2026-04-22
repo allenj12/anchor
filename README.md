@@ -358,32 +358,58 @@ Stopping a chain at a type name returns a fat pointer to the embedded struct:
 
 ### Arrays
 
-`[i stride]` inside `get`/`set!` indexes into a flat buffer:
+A bare number or expression in `get`/`set!` is a **byte offset** into the buffer. For element `i` with element size `sz`, the offset is `(* i sz)`:
 
 ```anchor
 (let arr (alloc (* n 8)))
-(set! arr [0 8] 42)
-(let v (get arr [0 8]))      ; scalar read
-
-;; array of structs — indexed step then named chain in one form
-(let pts (alloc (* n (sizeof Point))))
-(let stride (sizeof Point))
-(set! pts [0 stride] Point x 10)
-(set! pts [0 stride] Point y 20)
-(let x0 (get pts [0 stride] Point x))
-
-;; stopping at the type returns a fat pointer to the element
-(let p (get pts [1 stride] Point))   ; {pts.ptr + 1*stride, sizeof(Point)}
+(set! arr 0  42)              ; write to byte offset 0
+(set! arr 8  99)              ; write to byte offset 8
+(let v (get arr (* i 8)))     ; scalar read at offset i*8
 ```
 
-`[i stride]` followed by `->` dereferences a stored pointer:
+A lone offset in terminal position does a scalar read (8 bytes). To get a fat pointer instead, follow the offset with a size expression:
 
 ```anchor
-;; array of pointers — follow stored pointer and chain into struct
+;; fat pointer to element i, carrying the full array size for correct slicing
+(let fp (get arr 0 (* n 8)))       ; {arr.ptr, n*8}
+(let sl (ptr-add fp (* i 8)))      ; {arr.ptr + i*8, n*8 - i*8}
+
+;; literal or variable — both work
+(let fp (get arr 0 48))            ; {arr.ptr, 48}
+(let fp (get arr 0 total))         ; {arr.ptr, total}
+```
+
+Array of structs — byte offset then named chain in one form:
+
+```anchor
+(let pts (alloc (* n (sizeof Point))))
+(let sz  (sizeof Point))
+(set! pts 0      Point x 10)
+(set! pts 0      Point y 20)
+(let x0 (get pts 0      Point x))
+(let x1 (get pts sz     Point x))
+(let x2 (get pts (* 2 sz) Point x))
+
+;; stopping at the type name returns a fat pointer to that element
+(let p (get pts sz Point))          ; {pts.ptr + sz, sizeof(Point)}
+```
+
+Array of pointers — `->` dereferences a stored pointer:
+
+```anchor
 (let arr (alloc (* n 8)))
-(set! arr [0 8] p0)
-(let x (get arr [0 8] -> Point x))
-(set! arr [0 8] -> Point x 99)
+(set! arr 0 p0)
+(let x (get arr 0 -> Point x))
+(set! arr 0 -> Point x 99)
+```
+
+Pointer-to-array in a struct field — supply the array size at the use site:
+
+```anchor
+(struct Bag (len 8) (items 8))   ; items stores a raw pointer
+
+(let base (get bag Bag items -> 0 (* n sz)))   ; fat ptr, size = n*sz
+(let sl   (ptr-add base (* i sz)))             ; slice from element i
 ```
 
 **Storing fat pointers in struct fields.** When you store a pointer into a field, only the address is kept — `byte-size` on the recovered value falls back to the compile-time type size. To preserve the runtime size (e.g. for a dynamic array), use `(val ...)` as the final field specifier:
@@ -567,13 +593,13 @@ With `#'` or `` #` ``, the pattern engine handles `var ...` expansion directly.
           (let ,name (alloc ,size))
           ,@(let loop ([i 0] [vs val])
               (if (null? vs) '()
-                  (cons `(set! ,name (,i 8) ,(car vs))
+                  (cons `(set! ,name ,(* i 8) ,(car vs))
                         (loop (+ i 1) (cdr vs)))))))]))
 
 (arena-array primes 2 3 5 7 11 13)
 ; expands to: (let primes (alloc 48))
-;             (set! primes (0 8) 2)
-;             (set! primes (1 8) 3) ...
+;             (set! primes 0 2)
+;             (set! primes 8 3) ...
 ```
 
 **`unroll` — loop body inlined N times, enforced by guard:**
@@ -684,7 +710,7 @@ The `block` scope means any outer `it` is simply shadowed, not renamed.
 | `examples/structs.anc` | Structs, nested structs, unions, enums, `val` fields, array-of-structs |
 | `examples/macros_showcase.anc` | Full macro spectrum: `syntax-rules` → `macro-case` → macros defining macros |
 | `examples/fn_pointers.anc` | `fn-ptr`, `call-ptr`, `fn-c`, `call-ptr-c`, passing callbacks to `qsort` |
-| `examples/get_set_chains.anc` | `get`/`set!` edge cases: array-of-structs, array-of-pointers, `->` chaining, `[(val i)]` |
+| `examples/get_set_chains.anc` | `get`/`set!` edge cases: array-of-structs, array-of-pointers, `->` chaining, byte-offset chains, size terminals, `ptr-add` slicing, `(val ...)` round-trips |
 
 ---
 
