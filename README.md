@@ -116,6 +116,30 @@ Anchor uses Chez Scheme's `#\` syntax. Character literals evaluate to their Unic
 #\[        ; 91  (punctuation)
 ```
 
+### Includes
+
+Split code across multiple files using `(include "path/to/file.anc")`. The compiler resolves includes at parse time and inlines them into the AST before expansion — so macros, structs, and functions defined in an included file are visible everywhere after the include point.
+
+```anchor
+(include "math.anc")
+(include "utils/string.anc")
+```
+
+Paths are relative to the file containing the include. You only pass one file to the compiler; everything else comes in through includes:
+
+```bash
+./anchorc main.anc --run
+```
+
+Duplicate includes are silently ignored — each file is inlined at most once regardless of how many times it appears, so circular or redundant includes are safe.
+
+C header includes pass through unchanged to the generated C file:
+
+```anchor
+(include <stdio.h>)
+(include "mylib.h")
+```
+
 ### FFI
 
 Declare a C function once; call it directly. Fixed parameters are automatically cast

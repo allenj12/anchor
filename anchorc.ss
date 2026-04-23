@@ -1,10 +1,7 @@
 ;;; anchorc.ss — Anchor language compiler (Chez Scheme implementation)
 ;;;
 ;;; Usage:
-;;;   chez --script anchorc.ss <file.anc> [file2.anc ...] [options]
-;;;
-;;; Multiple input files are concatenated and processed as a single unit,
-;;; producing one C file.  Output name is derived from the first input.
+;;;   chez --script anchorc.ss <file.anc> [options]
 ;;;
 ;;; Options:
 ;;;   -o <out>       Output file (.c → transpile only; no extension → compile binary)
@@ -66,7 +63,9 @@
               (char=? (string-ref (car rest) 0) #\-))
          (anchor-error "unknown flag" (car rest))]
         [else
-         (set! inputs (append inputs (list (car rest))))
+         (when (not (null? inputs))
+           (anchor-error "only one input file is supported; use (include \"...\") for additional files"))
+         (set! inputs (list (car rest)))
          (loop (cdr rest))]))
     (lambda (key)
       (case key
@@ -91,6 +90,45 @@
        (substring path 0 i)]
       [(memv (string-ref path i) '(#\/ #\\)) path]
       [else (loop (fx- i 1))])))
+
+;; ---------------------------------------------------------------------------
+;; Include resolution
+;; ---------------------------------------------------------------------------
+
+(define *included-files* (make-hashtable string-hash string=?))
+
+(define (anc-include? form)
+  (and (pair? form)
+       (eq? (id-sym (car form)) 'include)
+       (fx= (length form) 2)
+       (string? (cadr form))
+       (let ([s (cadr form)])
+         (and (fx>= (string-length s) 4)
+              (string=? (substring s (fx- (string-length s) 4) (string-length s)) ".anc")))))
+
+(define (resolve-path base-dir rel)
+  (if (or (fx= (string-length rel) 0) (char=? (string-ref rel 0) #\/))
+      rel
+      (string-append base-dir "/" rel)))
+
+(define (resolve-anc-includes forms base-dir)
+  (apply append
+    (map (lambda (form)
+           (if (anc-include? form)
+             (let* ([rel     (cadr form)]
+                    [path    (resolve-path base-dir rel)]
+                    [key     path])
+               (if (hashtable-ref *included-files* key #f)
+                 '()
+                 (begin
+                   (hashtable-set! *included-files* key #t)
+                   (unless (file-exists? path)
+                     (anchor-error "include: file not found" path))
+                   (resolve-anc-includes
+                     (anchor-parse (read-file path) path)
+                     (path-parent path)))))
+             (list form)))
+         forms)))
 
 ;; ---------------------------------------------------------------------------
 ;; Main
@@ -120,19 +158,20 @@
             (string-append (current-directory) "/" dir)))))
 
 (define (main . args)
-  (let* ([opts   (parse-args args)]
-         [inputs (opts 'inputs)])
-    (when (null? inputs)
-      (display "usage: anchorc <file.anc> [file2.anc ...] [--emit-ast] [--emit-exp] [--run] [-o out]\n")
+  (let* ([opts  (parse-args args)]
+         [input (let ([ins (opts 'inputs)])
+                  (when (null? ins)
+                    (display "usage: anchorc <file.anc> [--emit-ast] [--emit-exp] [--run] [-o out]\n")
+                    (exit 1))
+                  (car ins))])
+    (unless (file-exists? input)
+      (display (string-append "anchorc: file not found: " input "\n"))
       (exit 1))
-    (for-each (lambda (p)
-                (unless (file-exists? p)
-                  (display (string-append "anchorc: file not found: " p "\n"))
-                  (exit 1)))
-              inputs)
+    (hashtable-set! *included-files* input #t)
     (let* ([prelude (anchor-parse *embedded-prelude* "<prelude>")]
-           [ast    (append prelude (apply append (map (lambda (p) (anchor-parse (read-file p) p)) inputs)))]
-           [base   (path-strip-extension (car inputs))]
+           [raw    (anchor-parse (read-file input) input)]
+           [ast    (append prelude (resolve-anc-includes raw (path-parent input)))]
+           [base   (path-strip-extension input)]
            [cc     (opts 'cc)]
            [cflags (opts 'cflags)])
         (cond
