@@ -272,13 +272,20 @@
       [(eq? (car expr) 'let)
        (let ([nm (and (pair? (cdr expr)) (cadr expr))])
          (append (if (binding? nm) (list nm) '())
-                 (scan (cddr expr))))]
+                 (if (pair? (cdr expr)) (scan (cddr expr)) '())))]
       [(eq? (car expr) 'fn)
+       ;; Guard all cdr/cddr/cdddr accesses: `fn` may appear as a bare symbol
+       ;; inside data positions (e.g. field names), producing short lists like (fn).
        (let* ([nm     (and (pair? (cdr expr)) (cadr expr))]
-              [params (and (pair? (cddr expr)) (list? (caddr expr)) (caddr expr))])
+              [params (and (pair? (cdr expr))
+                           (pair? (cddr expr))
+                           (list? (caddr expr))
+                           (caddr expr))])
          (append (if (binding? nm) (list nm) '())
                  (filter binding? (or params '()))
-                 (scan (cdddr expr))))]
+                 (if (and (pair? (cdr expr)) (pair? (cddr expr)))
+                     (scan (cdddr expr))
+                     '())))]
       [else
        (append (scan (car expr))
                (scan (cdr expr)))]))
@@ -719,7 +726,8 @@
      (let ([hs (id-sym (car form))])
        (cond
          ;; fn — collect stx names in body, build rename env for params, walk body
-         [(eq? hs 'fn)
+         ;; Guard: (fn 8) can appear as a struct field spec — skip short forms.
+         [(and (eq? hs 'fn) (pair? (cdr form)) (pair? (cddr form)) (list? (caddr form)))
           (let* ([nm     (cadr form)]
                  [params (caddr form)]
                  [body   (cdddr form)]
