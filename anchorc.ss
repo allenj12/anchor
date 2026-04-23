@@ -30,6 +30,7 @@
 (include "anchor/reader.ss")
 (include "anchor/expander.ss")
 (include "anchor/codegen.ss")
+(include "anchor/prelude-embedded.ss")
 
 ;; ---------------------------------------------------------------------------
 ;; Argument parsing
@@ -129,7 +130,7 @@
                   (display (string-append "anchorc: file not found: " p "\n"))
                   (exit 1)))
               inputs)
-    (let* ([prelude (anchor-parse (read-file (string-append (effective-compiler-dir) "/anchor/prelude.anc")) "<prelude>")]
+    (let* ([prelude (anchor-parse *embedded-prelude* "<prelude>")]
            [ast    (append prelude (apply append (map (lambda (p) (anchor-parse (read-file p) p)) inputs)))]
            [base   (path-strip-extension (car inputs))]
            [cc     (opts 'cc)]

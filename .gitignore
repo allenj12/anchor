@@ -23,3 +23,4 @@ examples/array
 examples/linked_list
 examples/structs
 examples/macros_showcase
+anchor/prelude-embedded.ss

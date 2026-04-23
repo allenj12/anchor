@@ -11,6 +11,15 @@
 (optimize-level 3)
 (debug-level 0)
 (compile-imported-libraries #t)
+
+;; Embed prelude.anc as a string constant so the binary is self-contained.
+(call-with-output-file "anchor/prelude-embedded.ss"
+  (lambda (out)
+    (write `(define *embedded-prelude*
+              ,(call-with-input-file "anchor/prelude.anc" get-string-all)) out)
+    (newline out))
+  '(replace))
+
 (compile-program "anchorc.ss")
 
 (fasl-compressed #f)
