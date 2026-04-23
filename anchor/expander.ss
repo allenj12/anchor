@@ -512,10 +512,11 @@
   ;; environment that eval uses.  Pass all expander helpers the template might
   ;; call as outer lambda parameters so they are closed over lexically rather
   ;; than looked up by name at runtime.
-  ((eval `(lambda (match-pattern anchor-error anchor-error/loc id-sym anchor-gensym instantiate instantiate-quasi datum->syntax)
+  ((eval `(lambda (match-pattern anchor-error anchor-error/loc id-sym anchor-gensym instantiate instantiate-quasi datum->syntax is-struct?)
             (lambda (_form)
               ,(build-clause-chain '_form lits-form clauses))))
-   match-pattern anchor-error anchor-error/loc id-sym anchor-gensym instantiate instantiate-quasi anc-datum->syntax))
+   match-pattern anchor-error anchor-error/loc id-sym anchor-gensym instantiate instantiate-quasi anc-datum->syntax
+   anchor-is-struct?))
 
 ;; Identity helpers available in transformer bodies — Anchor AST is plain data.
 (define (anc-syntax->datum stx) stx)
@@ -583,6 +584,21 @@
 ;; Top-level expander
 ;; ---------------------------------------------------------------------------
 
+;; ---------------------------------------------------------------------------
+;; Struct registry — tracks struct names seen during expansion so macro-case
+;; transformers can call (is-struct? name) in guard expressions.
+;; ---------------------------------------------------------------------------
+
+(define *anchor-known-structs* (make-eq-hashtable))
+
+(define (anchor-is-struct? x)
+  (let ([sym (cond [(stx? x) (stx-sym x)] [(symbol? x) x] [else #f])])
+    (and sym (hashtable-ref *anchor-known-structs* sym #f))))
+
+(define (anchor-register-struct! x)
+  (let ([sym (cond [(stx? x) (stx-sym x)] [(symbol? x) x] [else #f])])
+    (when sym (hashtable-set! *anchor-known-structs* sym #t))))
+
 (define (make-expander)
   (let ([macros (make-eq-hashtable)])
 
@@ -605,6 +621,11 @@
               #f]
              [(eq? hs 'quote)      expr]
              [(eq? hs 'quasiquote) (expand-quasiquote (cadr expr))]
+             ;; Track struct/union definitions for is-struct? in macro-case guards
+             [(memv hs '(struct unpacked-struct union))
+              (when (and (pair? (cdr expr)) (or (symbol? (cadr expr)) (stx? (cadr expr))))
+                (anchor-register-struct! (id-sym (cadr expr))))
+              (filter-map expand expr)]
              [(hashtable-ref macros hs #f)
               ;; Level 3: KFFD mark/anti-mark mechanism.
               ;; Step 1 - mark input with fresh m: user identifiers acquire m.
