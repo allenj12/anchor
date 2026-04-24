@@ -35,6 +35,10 @@
     [(_ ptr S f -> rest ...)
      (is-struct? S)
      `(get (%scalar (%addr-offset ,ptr ,S ,f)) ,@rest)]
+    ;; field pointer + offset: (get ptr S f off rest ...) — dereference field, then navigate
+    [(_ ptr S f off rest ...)
+     (and (is-struct? S) (not (is-struct? off)))
+     `(get (%scalar (%addr-offset ,ptr ,S ,f)) ,off ,@rest)]
     ;; embedded struct chain: (get ptr S f S2 rest ...)
     [(_ ptr S f S2 rest ...)
      (and (is-struct? S) (is-struct? S2))
@@ -64,6 +68,10 @@
     [(_ ptr S f -> rest ...)
      (is-struct? S)
      `(aref (%scalar (%addr-offset ,ptr ,S ,f)) ,@rest)]
+    ;; field pointer + offset: (aref ptr S f off rest ...) — dereference field, then navigate
+    [(_ ptr S f off rest ...)
+     (and (is-struct? S) (not (is-struct? off)))
+     `(aref (%scalar (%addr-offset ,ptr ,S ,f)) ,off ,@rest)]
     ;; embedded struct chain: (aref ptr S f S2 rest ...)
     [(_ ptr S f S2 rest ...)
      (and (is-struct? S) (is-struct? S2))
@@ -102,6 +110,10 @@
     [(_ ptr S f -> rest ...)
      (is-struct? S)
      `(set! (%scalar (%addr-offset ,ptr ,S ,f)) ,@rest)]
+    ;; field pointer + offset: (set! ptr S f off rest ...) — dereference field, then navigate
+    [(_ ptr S f off rest ...)
+     (and (is-struct? S) (not (is-struct? off)))
+     `(set! (%scalar (%addr-offset ,ptr ,S ,f)) ,off ,@rest)]
     ;; embedded struct chain write: (set! ptr S f S2 rest ...)
     [(_ ptr S f S2 rest ...)
      (and (is-struct? S) (is-struct? S2))
