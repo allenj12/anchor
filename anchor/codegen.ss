@@ -354,6 +354,12 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
           (let ([v (emit-expr (car args) ctx pre)])
             (string-append "anchor_int(" v " == ANCHOR_NIL)"))]
 
+         ;; trap — unconditional abort (__builtin_trap)
+         [(eq? h 'trap)
+          (unless (null? args) (anchor-error "trap: no arguments"))
+          (pre-add! pre "__builtin_trap();")
+          "ANCHOR_NIL"]
+
          ;; embed-bytes: (embed-bytes bv) — raw bytevector as static data, no null terminator
          [(eq? h 'embed-bytes)
           (unless (and (fx= (length args) 1) (bytevector? (car args)))
@@ -442,6 +448,19 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
          [(eq? h 'alloc)
           (unless (fx= (length args) 1) (anchor-error "alloc: (alloc SIZE)"))
           (string-append "anchor_alloc(" (emit-size-expr (car args) ctx) ")")]
+
+         ;; arena-remaining — bytes left in current arena
+         [(eq? h 'arena-remaining)
+          (unless (null? args) (anchor-error "arena-remaining: no arguments"))
+          "anchor_int((intptr_t)(_anchor_arena_top->cap - _anchor_arena_top->used))"]
+
+         ;; arena-in? — 1 if ptr falls within the current arena's buffer, 0 otherwise
+         [(eq? h 'arena-in?)
+          (unless (fx= (length args) 1) (anchor-error "arena-in?: (arena-in? ptr)"))
+          (let ([v (emit-expr (car args) ctx pre)])
+            (string-append
+              "anchor_int((char*)(uintptr_t)(" v ") >= _anchor_arena_top->buf && "
+              "(char*)(uintptr_t)(" v ") < _anchor_arena_top->buf + _anchor_arena_top->cap ? 1 : 0)"))]
 
          ;; sizeof — Anchor struct/enum or C type
          [(eq? h 'sizeof)
