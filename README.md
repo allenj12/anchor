@@ -2,9 +2,10 @@
 
 Anchor is a systems programming language with Lisp syntax that compiles to C.
 
-Every value is an `AnchorVal` fat pointer `{void* ptr, size_t size}`. Scalars live
-unboxed in the `ptr` field. Memory is managed through arenas — bump-pointer regions
-that free all at once when the function returns. There is no GC.
+Every value is an `AnchorVal` — a raw 64-bit quantity. Pointers and integers are
+stored directly with no boxing or tagging visible to user code. Memory is managed
+through arenas — bump-pointer regions that free all at once when the function returns.
+There is no GC.
 
 The macro system is hygienic `syntax-rules` plus `macro-case`, which runs arbitrary
 Chez Scheme at expand time. This lets macros compute sizes, unroll loops, generate
@@ -254,18 +255,6 @@ The signature `((param-types...) -> ret-type)` matches the `ffi` declaration syn
     ))
 ```
 
-`byte-size` returns the allocation size of any value in bytes:
-
-```anchor
-(let arr (alloc (* 6 8)))
-(byte-size arr)   ; → 48
-(byte-size 42)    ; → 8  (scalar — always 8)
-(byte-size nil)   ; → 0
-```
-
-This is useful for passing arrays around without a separate length: divide by element
-size to recover element count, or use it as an end-of-allocation guard.
-
 `global-arena` declares a named arena whose backing buffer lives for the entire
 program. Use it when allocations need to outlive the function that creates them —
 linked lists, trees, or any per-request scratch buffer that gets rebuilt in a loop.
@@ -352,7 +341,7 @@ Fields default to 8 bytes. Specify smaller sizes explicitly (e.g. 4 for `int`,
 (let px (get p Point x))   ; → anchor_int(100)
 ```
 
-`get` and `set!` take the pointer first, then the struct type, then fields. Nest structs inline using `(sizeof Name)` as the field size — chain field names to navigate without an intermediate variable. Use `->` to follow a stored pointer instead of navigating into inline bytes:
+`get`, `aref`, and `set!` take the pointer first, then the struct type, then fields. Nest structs inline using `(sizeof Name)` as the field size — chain field names to navigate without an intermediate variable. Use `->` to follow a stored pointer instead of navigating into inline bytes:
 
 ```anchor
 (struct AABB
@@ -374,11 +363,15 @@ Fields default to 8 bytes. Specify smaller sizes explicitly (e.g. 4 for `int`,
 (set! n Node nxt -> Node val 99)
 ```
 
-Stopping a chain at a type name returns a fat pointer to the embedded struct:
+`aref` is the address-returning mirror of `get` — same navigation syntax, but stops at the address rather than reading the value. Use it wherever you need a pointer to a field rather than its contents:
 
 ```anchor
-(let inner (get b AABB min Point))   ; {ptr+offset, sizeof(Point)} — chainable
+(aref b AABB min Point x)   ; address of x inside the embedded min Point
+(aref b AABB min Point)     ; address of the embedded min Point itself
+(aref b AABB min)           ; address of the min field
 ```
+
+`aref` supports the full navigation chain including `->` pointer follows and byte-offset steps, so it composes naturally with array indexing.
 
 ### Arrays
 
@@ -391,31 +384,20 @@ A bare number or expression in `get`/`set!` is a **byte offset** into the buffer
 (let v (get arr (* i 8)))     ; scalar read at offset i*8
 ```
 
-A lone offset in terminal position does a scalar read (8 bytes). To get a fat pointer instead, follow the offset with a size expression:
-
-```anchor
-;; fat pointer to element i, carrying the full array size for correct slicing
-(let fp (get arr 0 (* n 8)))       ; {arr.ptr, n*8}
-(let sl (ptr-add fp (* i 8)))      ; {arr.ptr + i*8, n*8 - i*8}
-
-;; literal or variable — both work
-(let fp (get arr 0 48))            ; {arr.ptr, 48}
-(let fp (get arr 0 total))         ; {arr.ptr, total}
-```
-
 Array of structs — byte offset then named chain in one form:
 
 ```anchor
 (let pts (alloc (* n (sizeof Point))))
 (let sz  (sizeof Point))
-(set! pts 0      Point x 10)
-(set! pts 0      Point y 20)
-(let x0 (get pts 0      Point x))
-(let x1 (get pts sz     Point x))
+(set! pts 0        Point x 10)
+(set! pts 0        Point y 20)
+(let x0 (get pts 0        Point x))
+(let x1 (get pts sz       Point x))
 (let x2 (get pts (* 2 sz) Point x))
 
-;; stopping at the type name returns a fat pointer to that element
-(let p (get pts sz Point))          ; {pts.ptr + sz, sizeof(Point)}
+;; aref for a pointer to element i
+(let p (aref pts (* i sz) Point))      ; address of element i
+(let px (aref pts (* i sz) Point x))   ; address of field x in element i
 ```
 
 Array of pointers — `->` dereferences a stored pointer:
@@ -427,39 +409,16 @@ Array of pointers — `->` dereferences a stored pointer:
 (set! arr 0 -> Point x 99)
 ```
 
-Pointer-to-array in a struct field — supply the array size at the use site:
+Pointer-to-array in a struct field — follow with `->` then navigate by byte offset:
 
 ```anchor
 (struct Bag (len 8) (items 8))   ; items stores a raw pointer
 
-(let base (get bag Bag items -> 0 (* n sz)))   ; fat ptr, size = n*sz
-(let sl   (ptr-add base (* i sz)))             ; slice from element i
+;; get items base pointer, then index into it
+(let base (get bag Bag items))             ; follow the items pointer
+(let x (get base (* i sz) Point x))       ; element i, field x
+(let addr (aref base (* i sz) Point x))   ; address of element i, field x
 ```
-
-**Storing fat pointers in struct fields.** When you store a pointer into a field, only the address is kept — `byte-size` on the recovered value falls back to the compile-time type size. To preserve the runtime size (e.g. for a dynamic array), use `(val ...)` as the final field specifier:
-
-```anchor
-;; 1-field: 16-byte field stores the full AnchorVal (ptr + size) verbatim
-(struct Slot (buf 16))
-(set! s Slot (val buf) data)        ; store
-(let v (get s Slot (val buf)))      ; recover — byte-size works
-
-;; 2-field: split across two 8-byte fields (also individually accessible)
-(struct DynArray (data 8) (len 8))
-(set! arr DynArray (val data len) buf)
-(let v (get arr DynArray (val data len)))
-(printf "elements: %d\n" (cast int (/ (byte-size v) (sizeof Elem))))
-```
-
-**Fat pointer arrays.** Use `[(val i)]` to store and retrieve full AnchorVals (ptr + size) from a 16-byte-per-element array:
-
-```anchor
-(let arr (alloc (* n 16)))
-(set! arr [(val 0)] buf)             ; store full AnchorVal at slot 0
-(let v (get arr [(val 0)]))          ; recover — byte-size intact
-```
-
-The retrieved value is a fully boxed `AnchorVal` — `byte-size`, pointer arithmetic, and all Anchor operations work on it normally.
 
 ### Unions
 
@@ -510,10 +469,9 @@ Auto-incrementing (omit the value):
 `cons`, `car`, `cdr`, `set-car!`, `set-cdr!`, `nil`, and `null?` are built into the language.
 `cons` allocates a two-slot cell from the current arena.
 
-`nil` is `{NULL, 0}` — the same value serves as the empty list sentinel and as a
-null pointer. Pass it to any `ffi` function expecting a pointer; `null?` tests for
-it by checking the size field, which is uniquely `0` for nil (distinct from integer
-`0`, which is an unboxed scalar with a different size tag).
+`nil` is the zero value — a null pointer. Pass it to any `ffi` function expecting a
+pointer; `null?` tests for it. `nil` is distinct from integer `0`: a null check tests
+the pointer, not the integer value.
 
 ```anchor
 (let lst (cons 1 (cons 2 (cons 3 nil))))
@@ -731,19 +689,19 @@ The `block` scope means any outer `it` is simply shadowed, not renamed.
 | `examples/array.anc` | `alloc`, `get`/`set!`, bubble sort, `for` macro |
 | `examples/linked_list.anc` | `cons`/`car`/`cdr`/`nil`/`null?`, list operations |
 | `examples/global_arena.anc` | `global-arena`, `arena-reset!`, lists escaping function scope |
-| `examples/structs.anc` | Structs, nested structs, unions, enums, `val` fields, array-of-structs |
+| `examples/structs.anc` | Structs, nested structs, unions, enums, array-of-structs |
 | `examples/macros_showcase.anc` | Full macro spectrum: `syntax-rules` → `macro-case` → macros defining macros |
 | `examples/fn_pointers.anc` | `fn-ptr`, `call-ptr`, `fn-c`, `call-ptr-c`, passing callbacks to `qsort` |
-| `examples/get_set_chains.anc` | `get`/`set!` edge cases: array-of-structs, array-of-pointers, `->` chaining, byte-offset chains, size terminals, `ptr-add` slicing, `(val ...)` round-trips |
+| `examples/get_set_chains.anc` | `get`/`aref`/`set!` edge cases: array-of-structs, array-of-pointers, `->` pointer chaining, embedded struct chains, inline array fields, byte-offset navigation |
 
 ---
 
 ## Design notes
 
-**Fat pointers everywhere.** Every value carries both a pointer and a size. Scalars
-store their integer value in the `ptr` field with the high bit of `size` set as a tag.
-This means everything flows through a uniform ABI — no overloaded calling conventions,
-no special-casing for primitives.
+**Uniform value type.** Every value is an `AnchorVal` — a raw 64-bit quantity that
+holds either a pointer or an integer/float unboxed. Everything flows through the same
+ABI — no overloaded calling conventions, no special-casing for primitives, no GC
+write barriers.
 
 **Arenas, not GC.** `alloc` bumps a pointer. Anonymous `with-arena` scopes free all
 allocations when the block exits. `global-arena` declares a named arena with permanent

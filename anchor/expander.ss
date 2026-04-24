@@ -18,13 +18,12 @@
 
 (define *special-forms*
   '(do block let set! if while return fn ffi include
-    cast alloc ref deref ptr-add array-get array-set!
-    field-get field-set! sizeof-struct with-arena struct
+    cast alloc ref deref with-arena struct
     global global-set! extern-global const global-arena arena-reset! with-parent-arena
     sizeof break continue fn-ptr call-ptr call-ptr-c fn-c
     define-syntax syntax-rules macro-case syntax with-syntax quasisyntax unsyntax unsyntax-splicing quote quasiquote unquote unquote-splicing
     embed-bytes embed-string
-    cons car cdr set-car! set-cdr! nil null? byte-size
+    cons car cdr set-car! set-cdr! nil null?
     unpacked-struct union enum
     + - * / % +f -f *f /f +u -u *u /u %u
     == != < > <= >= ==f !=f <f >f <=f >=f <u >u <=u >=u
@@ -519,11 +518,11 @@
   ;; environment that eval uses.  Pass all expander helpers the template might
   ;; call as outer lambda parameters so they are closed over lexically rather
   ;; than looked up by name at runtime.
-  ((eval `(lambda (match-pattern anchor-error anchor-error/loc id-sym anchor-gensym instantiate instantiate-quasi datum->syntax is-struct?)
+  ((eval `(lambda (match-pattern anchor-error anchor-error/loc id-sym anchor-gensym instantiate instantiate-quasi datum->syntax is-struct? filter-map)
             (lambda (_form)
               ,(build-clause-chain '_form lits-form clauses))))
    match-pattern anchor-error anchor-error/loc id-sym anchor-gensym instantiate instantiate-quasi anc-datum->syntax
-   anchor-is-struct?))
+   anchor-is-struct? filter-map))
 
 ;; Identity helpers available in transformer bodies — Anchor AST is plain data.
 (define (anc-syntax->datum stx) stx)

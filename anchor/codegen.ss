@@ -4,179 +4,136 @@
 "#include <stddef.h>
 #include <stdint.h>
 #include <string.h>
+#include <stdbool.h>
+#include <stdlib.h>
 
 /* =========================================================
- * Anchor runtime — fat pointer + arena allocator
+ * Anchor runtime — raw 64-bit value representation
+ * =========================================================
+ *
+ * AnchorVal is a single 64-bit word.
+ * Integers: raw signed 64-bit value.
+ * Pointers: raw address (from malloc-backed arenas).
+ * null = 0.
+ *
+ * All arithmetic operates directly on raw values — zero overhead vs C.
  * ========================================================= */
 
-/* Every Anchor value is a fat pointer */
-typedef struct {
-    void*  ptr;
-    size_t size;
-} AnchorVal;
+typedef uint64_t AnchorVal;
 
-/* ---- Arena ---- */
-#ifndef ANCHOR_DEFAULT_ARENA_CAP
-#  define ANCHOR_DEFAULT_ARENA_CAP (1024 * 1024)   /* 1 MiB */
-#endif
+#define ANCHOR_NIL ((AnchorVal)0)
 
-typedef struct AnchorArena {
-    char*              buf;
-    size_t             cap;
-    size_t             used;
-    struct AnchorArena* prev;
-} AnchorArena;
+/* Pointer → void*: direct cast */
+#define _ANCH_HPTR(v)  ((void*)(uintptr_t)(v))
 
-/* Arena stack — each translation unit has its own (with-arena fns are self-contained) */
-static _Thread_local AnchorArena* _anchor_arena_top = NULL;
+/* Integer value: identity cast */
+#define _ANCH_IVAL(v)  ((intptr_t)(int64_t)(v))
 
-/* Allocate SIZE bytes from the current arena, aligned to 8 bytes */
-static inline AnchorVal anchor_alloc(size_t size) {
-    AnchorArena* a = _anchor_arena_top;
-    if (!a) { __builtin_trap(); }
-    size_t aligned = (size + 7u) & ~7u;
-    if (a->used + aligned > a->cap) { __builtin_trap(); }
-    void* ptr = a->buf + a->used;
-    a->used += aligned;
-    return (AnchorVal){ ptr, size };
-}
+/* Float: reinterpret bits as double */
+#define _ANCH_FVAL(v) \
+    ({ AnchorVal _av = (v); double _fv; __builtin_memcpy(&_fv, &_av, sizeof(double)); _fv; })
 
-/* ---- Unboxed scalar representation ----
- * Scalars (int, float, etc.) are stored directly in the ptr field.
- * size has its high bit set to distinguish from real heap pointers
- * (no real allocation can be >= 2^63 bytes).
- * The operator — not the tag — determines how ptr bits are interpreted.
- */
-#define ANCHOR_UNBOXED          ((size_t)1 << 63)
-#define _ANCH_IS_UNBOXED(v)     ((v).size >> 63)
-#define _ANCH_IVAL(v)           ((intptr_t)(uintptr_t)(v).ptr)
-#define _ANCH_FVAL(v)           \
-    ({ uint64_t _b = (uint64_t)(uintptr_t)(v).ptr; \
-       double _f; __builtin_memcpy(&_f, &_b, sizeof(double)); _f; })
-
-/* Hint: all pure arithmetic/comparison functions have no side effects.
- * __attribute__((const)) lets the compiler hoist loop-invariant calls. */
 #if defined(__GNUC__) || defined(__clang__)
 #  define ANCHOR_PURE __attribute__((const))
 #else
 #  define ANCHOR_PURE
 #endif
 
-/* ---- Literal constructors ---- */
+/* ---- Arena ---- */
 
-static inline ANCHOR_PURE AnchorVal anchor_int(intptr_t v) {
-    return (AnchorVal){ (void*)(uintptr_t)v, ANCHOR_UNBOXED };
+typedef struct _AnchorArena {
+    char*                buf;
+    size_t               cap;
+    size_t               used;
+    struct _AnchorArena* prev;
+} _AnchorArena;
+
+static _Thread_local _AnchorArena* _anchor_arena_top = NULL;
+#define ANCHOR_DEFAULT_ARENA_CAP (1024 * 1024)
+
+static inline AnchorVal anchor_alloc(size_t size) {
+    _AnchorArena* a = _anchor_arena_top;
+    if (!a) __builtin_trap();
+    size_t aligned = (size + 7u) & ~7u;
+    if (a->used + aligned > a->cap) __builtin_trap();
+    AnchorVal r = (AnchorVal)(uintptr_t)(a->buf + a->used);
+    a->used += aligned;
+    return r;
 }
+
+static inline void _anchor_arena_reset(_AnchorArena* a) { a->used = 0; }
+
+/* Wrap a raw C pointer as an AnchorVal */
+static inline ANCHOR_PURE AnchorVal anchor_ext(void* p) {
+    return p ? (AnchorVal)(uintptr_t)p : ANCHOR_NIL;
+}
+
+/* Unwrap AnchorVal pointer → void* */
+static inline void* _anch_ptr(AnchorVal v) { return (void*)(uintptr_t)v; }
+
+/* ---- Integer constructors / arithmetic — all raw, zero overhead vs C ---- */
+
+static inline ANCHOR_PURE AnchorVal anchor_int(intptr_t v)  { return (AnchorVal)(int64_t)v; }
+static inline ANCHOR_PURE AnchorVal anchor_add(AnchorVal a, AnchorVal b) { return a + b; }
+static inline ANCHOR_PURE AnchorVal anchor_sub(AnchorVal a, AnchorVal b) { return a - b; }
+static inline ANCHOR_PURE AnchorVal anchor_mul(AnchorVal a, AnchorVal b) { return a * b; }
+static inline ANCHOR_PURE AnchorVal anchor_div(AnchorVal a, AnchorVal b) { return (AnchorVal)((int64_t)a / (int64_t)b); }
+static inline ANCHOR_PURE AnchorVal anchor_mod(AnchorVal a, AnchorVal b) { return (AnchorVal)((int64_t)a % (int64_t)b); }
+
+/* ---- Float constructor / arithmetic ---- */
 
 static inline ANCHOR_PURE AnchorVal anchor_float(double v) {
-    uint64_t bits;
-    __builtin_memcpy(&bits, &v, sizeof(double));
-    return (AnchorVal){ (void*)(uintptr_t)bits, ANCHOR_UNBOXED };
+    AnchorVal bits; __builtin_memcpy(&bits, &v, sizeof(double)); return bits;
 }
-
-static inline AnchorVal anchor_str(const char* s) {
-    size_t len = __builtin_strlen(s) + 1;
-    AnchorVal val = anchor_alloc(len);
-    __builtin_memcpy(val.ptr, s, len);
-    return val;
-}
-
-/* Wrap an existing C pointer as a fat pointer (does NOT copy) */
-static inline ANCHOR_PURE AnchorVal anchor_ptr(void* p, size_t size) {
-    return (AnchorVal){ p, size };
-}
-
-/* ---- Integer arithmetic ---- */
-
-static inline ANCHOR_PURE AnchorVal anchor_add(AnchorVal a, AnchorVal b) { return anchor_int(_ANCH_IVAL(a) + _ANCH_IVAL(b)); }
-static inline ANCHOR_PURE AnchorVal anchor_sub(AnchorVal a, AnchorVal b) { return anchor_int(_ANCH_IVAL(a) - _ANCH_IVAL(b)); }
-static inline ANCHOR_PURE AnchorVal anchor_mul(AnchorVal a, AnchorVal b) { return anchor_int(_ANCH_IVAL(a) * _ANCH_IVAL(b)); }
-static inline ANCHOR_PURE AnchorVal anchor_div(AnchorVal a, AnchorVal b) { return anchor_int(_ANCH_IVAL(a) / _ANCH_IVAL(b)); }
-static inline ANCHOR_PURE AnchorVal anchor_mod(AnchorVal a, AnchorVal b) { return anchor_int(_ANCH_IVAL(a) % _ANCH_IVAL(b)); }
-
-/* ---- Float arithmetic ---- */
-
 static inline ANCHOR_PURE AnchorVal anchor_addf(AnchorVal a, AnchorVal b) { return anchor_float(_ANCH_FVAL(a) + _ANCH_FVAL(b)); }
 static inline ANCHOR_PURE AnchorVal anchor_subf(AnchorVal a, AnchorVal b) { return anchor_float(_ANCH_FVAL(a) - _ANCH_FVAL(b)); }
 static inline ANCHOR_PURE AnchorVal anchor_mulf(AnchorVal a, AnchorVal b) { return anchor_float(_ANCH_FVAL(a) * _ANCH_FVAL(b)); }
 static inline ANCHOR_PURE AnchorVal anchor_divf(AnchorVal a, AnchorVal b) { return anchor_float(_ANCH_FVAL(a) / _ANCH_FVAL(b)); }
 
-/* ---- Comparisons (result is AnchorVal wrapping 1 or 0) ---- */
+/* ---- Comparisons — direct on raw values ---- */
 
-static inline ANCHOR_PURE AnchorVal anchor_eq(AnchorVal a, AnchorVal b) { return anchor_int(_ANCH_IVAL(a) == _ANCH_IVAL(b)); }
-static inline ANCHOR_PURE AnchorVal anchor_ne(AnchorVal a, AnchorVal b) { return anchor_int(_ANCH_IVAL(a) != _ANCH_IVAL(b)); }
-static inline ANCHOR_PURE AnchorVal anchor_lt(AnchorVal a, AnchorVal b) { return anchor_int(_ANCH_IVAL(a) <  _ANCH_IVAL(b)); }
-static inline ANCHOR_PURE AnchorVal anchor_gt(AnchorVal a, AnchorVal b) { return anchor_int(_ANCH_IVAL(a) >  _ANCH_IVAL(b)); }
-static inline ANCHOR_PURE AnchorVal anchor_le(AnchorVal a, AnchorVal b) { return anchor_int(_ANCH_IVAL(a) <= _ANCH_IVAL(b)); }
-static inline ANCHOR_PURE AnchorVal anchor_ge(AnchorVal a, AnchorVal b) { return anchor_int(_ANCH_IVAL(a) >= _ANCH_IVAL(b)); }
+static inline ANCHOR_PURE AnchorVal anchor_eq(AnchorVal a, AnchorVal b) { return (AnchorVal)((int64_t)a == (int64_t)b); }
+static inline ANCHOR_PURE AnchorVal anchor_ne(AnchorVal a, AnchorVal b) { return (AnchorVal)((int64_t)a != (int64_t)b); }
+static inline ANCHOR_PURE AnchorVal anchor_lt(AnchorVal a, AnchorVal b) { return (AnchorVal)((int64_t)a <  (int64_t)b); }
+static inline ANCHOR_PURE AnchorVal anchor_gt(AnchorVal a, AnchorVal b) { return (AnchorVal)((int64_t)a >  (int64_t)b); }
+static inline ANCHOR_PURE AnchorVal anchor_le(AnchorVal a, AnchorVal b) { return (AnchorVal)((int64_t)a <= (int64_t)b); }
+static inline ANCHOR_PURE AnchorVal anchor_ge(AnchorVal a, AnchorVal b) { return (AnchorVal)((int64_t)a >= (int64_t)b); }
 
 /* ---- Bitwise ---- */
 
-static inline ANCHOR_PURE AnchorVal anchor_band(AnchorVal a, AnchorVal b)   { return anchor_int(_ANCH_IVAL(a) &  _ANCH_IVAL(b)); }
-static inline ANCHOR_PURE AnchorVal anchor_bor (AnchorVal a, AnchorVal b)   { return anchor_int(_ANCH_IVAL(a) |  _ANCH_IVAL(b)); }
-static inline ANCHOR_PURE AnchorVal anchor_bxor(AnchorVal a, AnchorVal b)   { return anchor_int(_ANCH_IVAL(a) ^  _ANCH_IVAL(b)); }
-static inline ANCHOR_PURE AnchorVal anchor_bnot(AnchorVal a)                { return anchor_int(~_ANCH_IVAL(a)); }
-static inline ANCHOR_PURE AnchorVal anchor_lshift(AnchorVal a, AnchorVal b) { return anchor_int(_ANCH_IVAL(a) << _ANCH_IVAL(b)); }
-static inline ANCHOR_PURE AnchorVal anchor_rshift(AnchorVal a, AnchorVal b) { return anchor_int((intptr_t)((uintptr_t)_ANCH_IVAL(a) >> _ANCH_IVAL(b))); }
+static inline ANCHOR_PURE AnchorVal anchor_band(AnchorVal a, AnchorVal b)   { return a & b; }
+static inline ANCHOR_PURE AnchorVal anchor_bor (AnchorVal a, AnchorVal b)   { return a | b; }
+static inline ANCHOR_PURE AnchorVal anchor_bxor(AnchorVal a, AnchorVal b)   { return a ^ b; }
+static inline ANCHOR_PURE AnchorVal anchor_bnot(AnchorVal a)                { return ~a; }
+static inline ANCHOR_PURE AnchorVal anchor_lshift(AnchorVal a, AnchorVal b) { return a << b; }
+static inline ANCHOR_PURE AnchorVal anchor_rshift(AnchorVal a, AnchorVal b) { return (AnchorVal)((uint64_t)a >> b); }
 
 /* ---- Unsigned arithmetic ---- */
 
-static inline ANCHOR_PURE AnchorVal anchor_addu(AnchorVal a, AnchorVal b) { return anchor_int((intptr_t)((uintptr_t)_ANCH_IVAL(a) + (uintptr_t)_ANCH_IVAL(b))); }
-static inline ANCHOR_PURE AnchorVal anchor_subu(AnchorVal a, AnchorVal b) { return anchor_int((intptr_t)((uintptr_t)_ANCH_IVAL(a) - (uintptr_t)_ANCH_IVAL(b))); }
-static inline ANCHOR_PURE AnchorVal anchor_mulu(AnchorVal a, AnchorVal b) { return anchor_int((intptr_t)((uintptr_t)_ANCH_IVAL(a) * (uintptr_t)_ANCH_IVAL(b))); }
-static inline ANCHOR_PURE AnchorVal anchor_divu(AnchorVal a, AnchorVal b) { return anchor_int((intptr_t)((uintptr_t)_ANCH_IVAL(a) / (uintptr_t)_ANCH_IVAL(b))); }
-static inline ANCHOR_PURE AnchorVal anchor_modu(AnchorVal a, AnchorVal b) { return anchor_int((intptr_t)((uintptr_t)_ANCH_IVAL(a) % (uintptr_t)_ANCH_IVAL(b))); }
-static inline ANCHOR_PURE AnchorVal anchor_ltu (AnchorVal a, AnchorVal b) { return anchor_int((uintptr_t)_ANCH_IVAL(a) <  (uintptr_t)_ANCH_IVAL(b)); }
-static inline ANCHOR_PURE AnchorVal anchor_gtu (AnchorVal a, AnchorVal b) { return anchor_int((uintptr_t)_ANCH_IVAL(a) >  (uintptr_t)_ANCH_IVAL(b)); }
-static inline ANCHOR_PURE AnchorVal anchor_leu (AnchorVal a, AnchorVal b) { return anchor_int((uintptr_t)_ANCH_IVAL(a) <= (uintptr_t)_ANCH_IVAL(b)); }
-static inline ANCHOR_PURE AnchorVal anchor_geu (AnchorVal a, AnchorVal b) { return anchor_int((uintptr_t)_ANCH_IVAL(a) >= (uintptr_t)_ANCH_IVAL(b)); }
+static inline ANCHOR_PURE AnchorVal anchor_addu(AnchorVal a, AnchorVal b) { return a + b; }
+static inline ANCHOR_PURE AnchorVal anchor_subu(AnchorVal a, AnchorVal b) { return a - b; }
+static inline ANCHOR_PURE AnchorVal anchor_mulu(AnchorVal a, AnchorVal b) { return a * b; }
+static inline ANCHOR_PURE AnchorVal anchor_divu(AnchorVal a, AnchorVal b) { return a / b; }
+static inline ANCHOR_PURE AnchorVal anchor_modu(AnchorVal a, AnchorVal b) { return a % b; }
+static inline ANCHOR_PURE AnchorVal anchor_ltu (AnchorVal a, AnchorVal b) { return (AnchorVal)(a <  b); }
+static inline ANCHOR_PURE AnchorVal anchor_gtu (AnchorVal a, AnchorVal b) { return (AnchorVal)(a >  b); }
+static inline ANCHOR_PURE AnchorVal anchor_leu (AnchorVal a, AnchorVal b) { return (AnchorVal)(a <= b); }
+static inline ANCHOR_PURE AnchorVal anchor_geu (AnchorVal a, AnchorVal b) { return (AnchorVal)(a >= b); }
 
 /* ---- Float comparisons ---- */
 
-static inline ANCHOR_PURE AnchorVal anchor_eqf(AnchorVal a, AnchorVal b) { return anchor_int(_ANCH_FVAL(a) == _ANCH_FVAL(b)); }
-static inline ANCHOR_PURE AnchorVal anchor_nef(AnchorVal a, AnchorVal b) { return anchor_int(_ANCH_FVAL(a) != _ANCH_FVAL(b)); }
-static inline ANCHOR_PURE AnchorVal anchor_ltf(AnchorVal a, AnchorVal b) { return anchor_int(_ANCH_FVAL(a) <  _ANCH_FVAL(b)); }
-static inline ANCHOR_PURE AnchorVal anchor_gtf(AnchorVal a, AnchorVal b) { return anchor_int(_ANCH_FVAL(a) >  _ANCH_FVAL(b)); }
-static inline ANCHOR_PURE AnchorVal anchor_lef(AnchorVal a, AnchorVal b) { return anchor_int(_ANCH_FVAL(a) <= _ANCH_FVAL(b)); }
-static inline ANCHOR_PURE AnchorVal anchor_gef(AnchorVal a, AnchorVal b) { return anchor_int(_ANCH_FVAL(a) >= _ANCH_FVAL(b)); }
-
-/* ---- Linked list (cons cells) ----
- *
- * A cons cell is two adjacent AnchorVals (16 bytes) arena-allocated.
- * nil is represented as {NULL, 0} — a naturally zero-sized pointer.
- *
- *   anchor_cons(car, cdr)  — allocate cell from current arena
- *   ANCHOR_CAR(cell)       — first element
- *   ANCHOR_CDR(cell)       — rest of list
- *   ANCHOR_NIL             — empty list sentinel
- *   ANCHOR_NULLP(v)        — true if v is nil
- */
-
-#define ANCHOR_NIL         ((AnchorVal){NULL, 0})
-#define ANCHOR_NULLP(v)    ((v).size == 0)
-#define ANCHOR_CAR(cell)       (((AnchorVal*)(cell).ptr)[0])
-#define ANCHOR_CDR(cell)       (((AnchorVal*)(cell).ptr)[1])
-#define ANCHOR_SET_CAR(cell,v) (((AnchorVal*)(cell).ptr)[0] = (v))
-#define ANCHOR_SET_CDR(cell,v) (((AnchorVal*)(cell).ptr)[1] = (v))
-
-static inline AnchorVal anchor_cons(AnchorVal car, AnchorVal cdr) {
-    AnchorVal cell = anchor_alloc(2 * sizeof(AnchorVal));
-    ((AnchorVal*)cell.ptr)[0] = car;
-    ((AnchorVal*)cell.ptr)[1] = cdr;
-    return cell;
-}
+static inline ANCHOR_PURE AnchorVal anchor_eqf(AnchorVal a, AnchorVal b) { return (AnchorVal)(_ANCH_FVAL(a) == _ANCH_FVAL(b)); }
+static inline ANCHOR_PURE AnchorVal anchor_nef(AnchorVal a, AnchorVal b) { return (AnchorVal)(_ANCH_FVAL(a) != _ANCH_FVAL(b)); }
+static inline ANCHOR_PURE AnchorVal anchor_ltf(AnchorVal a, AnchorVal b) { return (AnchorVal)(_ANCH_FVAL(a) <  _ANCH_FVAL(b)); }
+static inline ANCHOR_PURE AnchorVal anchor_gtf(AnchorVal a, AnchorVal b) { return (AnchorVal)(_ANCH_FVAL(a) >  _ANCH_FVAL(b)); }
+static inline ANCHOR_PURE AnchorVal anchor_lef(AnchorVal a, AnchorVal b) { return (AnchorVal)(_ANCH_FVAL(a) <= _ANCH_FVAL(b)); }
+static inline ANCHOR_PURE AnchorVal anchor_gef(AnchorVal a, AnchorVal b) { return (AnchorVal)(_ANCH_FVAL(a) >= _ANCH_FVAL(b)); }
 
 /* ---- Logical ---- */
 
-static inline ANCHOR_PURE AnchorVal anchor_and(AnchorVal a, AnchorVal b) {
-    return anchor_int(_ANCH_IVAL(a) && _ANCH_IVAL(b));
-}
-static inline ANCHOR_PURE AnchorVal anchor_or(AnchorVal a, AnchorVal b) {
-    return anchor_int(_ANCH_IVAL(a) || _ANCH_IVAL(b));
-}
-static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a) {
-    return anchor_int(!_ANCH_IVAL(a));
-}
+static inline ANCHOR_PURE AnchorVal anchor_and(AnchorVal a, AnchorVal b) { return (AnchorVal)(!!a && !!b); }
+static inline ANCHOR_PURE AnchorVal anchor_or (AnchorVal a, AnchorVal b) { return (AnchorVal)(!!a || !!b); }
+static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { return (AnchorVal)(!a); }
 ")
 
 
@@ -247,13 +204,13 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a) {
     (mutable structs      ctx-structs      ctx-structs-set!)   ; sym → ht{sym→(off.sz)}
     (mutable enums        ctx-enums        ctx-enums-set!)     ; sym → size (always 4)
     (mutable externs      ctx-externs      ctx-externs-set!)   ; sym → (ret . params)
-    (mutable arena-stack  ctx-arena-stack  ctx-arena-stack-set!)
+    (mutable arena-stack  ctx-arena-stack  ctx-arena-stack-set!) ; (type prev-var arena-var)
     (mutable fn-ret       ctx-fn-ret       ctx-fn-ret-set!)
     (mutable fwd-decls    ctx-fwd-decls    ctx-fwd-decls-set!)
     (mutable globals      ctx-globals      ctx-globals-set!)
     (mutable arena-depth  ctx-arena-depth  ctx-arena-depth-set!)
     (mutable var-depth    ctx-var-depth    ctx-var-depth-set!)
-    (mutable global-arenas ctx-global-arenas ctx-global-arenas-set!))
+    (mutable global-arenas ctx-global-arenas ctx-global-arenas-set!)) ; sym → c-var (string)
   (protocol
     (lambda (new)
       (lambda ()
@@ -276,20 +233,19 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a) {
     (ctx-tmp-n-set! ctx (fx+ n 1))
     (string-append "_anc_t" (number->string n))))
 
-(define (ctx-push-arena! ctx av global?)
-  (ctx-arena-stack-set! ctx (cons (cons av global?) (ctx-arena-stack ctx))))
-;; Push a restore entry: on cleanup, restores _anchor_arena_top to saved-var directly.
-;; Used by with-parent-arena — no new arena is created, just the top pointer is redirected.
+;; Arena stack entries:
+;;   (av . use-heap?) — arena var name (C string) + whether buf was malloc'd
+;;   ('restore . saved-var) — for with-parent-arena: restore top to saved-var
+(define (ctx-push-arena! ctx av use-heap?)
+  (ctx-arena-stack-set! ctx (cons (cons av use-heap?) (ctx-arena-stack ctx))))
 (define (ctx-push-restore! ctx saved-var)
   (ctx-arena-stack-set! ctx (cons (cons 'restore saved-var) (ctx-arena-stack ctx))))
-(define (ctx-pop-arena!  ctx)    (ctx-arena-stack-set! ctx (cdr (ctx-arena-stack ctx))))
-(define (ctx-in-arena?   ctx)    (pair? (ctx-arena-stack ctx)))
-(define (ctx-arena-top-global? ctx)
-  (and (pair? (ctx-arena-stack ctx))
-       (let ([top (car (ctx-arena-stack ctx))])
-         ;; restore entries allocate into the parent arena — treat as non-local (no copy needed)
-         (or (eq? (car top) 'restore) (cdr top)))))
+(define (ctx-pop-arena!  ctx) (ctx-arena-stack-set! ctx (cdr (ctx-arena-stack ctx))))
+(define (ctx-in-arena?   ctx) (pair? (ctx-arena-stack ctx)))
 
+;; Emit teardown for all arenas on stack (used on early return).
+;; Note: heap-buf frees are NOT emitted here — only top pointer restoration.
+;; Early returns from large arenas will leak the buffer (acceptable trade-off).
 (define (ctx-arena-cleanup ctx)
   (map (lambda (entry)
          (if (eq? (car entry) 'restore)
@@ -338,7 +294,10 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a) {
 
 (define (cast-type-str node)
   (cond
-    [(sym? node) (symbol->string (id-sym node))]
+    [(sym? node) (let ([s (symbol->string (id-sym node))])
+                   ;; unsigned-long → "unsigned long" etc.
+                   (list->string (map (lambda (c) (if (char=? c #\-) #\space c))
+                                      (string->list s))))]
     [(pair? node) (str-join (map cast-type-str node) " ")]
     [else (anchor-error "invalid type in cast" node)]))
 
@@ -352,7 +311,7 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a) {
     [(boolean? node)
      (if node "anchor_int(1)" "anchor_int(0)")]
 
-    ;; Bytevector — embed as static const array, yield anchor_ptr to it
+    ;; Bytevector — embed as static const array, yield anchor_ext pointer to it
     [(bytevector? node)
      (let* ([tmp  (ctx-tmp! ctx)]
             [len  (bytevector-length node)]
@@ -363,7 +322,7 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a) {
             [decl (string-append "static const unsigned char " tmp "_data[] = {"
                                  (str-join elts ", ") "};")])
        (ctx-fwd-decls-set! ctx (append (ctx-fwd-decls ctx) (list decl)))
-       (string-append "anchor_ptr((void*)" tmp "_data, " (number->string len) ")"))]
+       (string-append "anchor_ext((void*)" tmp "_data)"))]
 
     ;; Integer
     [(and (number? node) (exact? node))
@@ -378,8 +337,7 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a) {
 
     ;; String
     [(string? node)
-     (string-append "anchor_ptr((void*)\"" (escape-c-str node) "\", "
-                    (number->string (string-length node)) ")")]
+     (string-append "anchor_ext((void*)\"" (escape-c-str node) "\")")]
 
     ;; nil — empty list sentinel
     [(and (sym? node) (eq? (id-sym node) 'nil)) "ANCHOR_NIL"]
@@ -390,16 +348,26 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a) {
     [(pair? node)
      (let ([h (id-sym (car node))] [args (cdr node)])
        (cond
-         [(eq? h 'byte-size)
-          (unless (fx= (length args) 1) (anchor-error "byte-size: (byte-size val)"))
+         ;; %null-check — null test: value == 0
+         [(eq? h '%null-check)
+          (unless (fx= (length args) 1) (anchor-error "%null-check: (%null-check val)"))
           (let ([v (emit-expr (car args) ctx pre)])
-            (string-append "anchor_int((" v ").size & ANCHOR_UNBOXED ? 8 : (intptr_t)(" v ").size)"))]
+            (string-append "anchor_int(" v " == ANCHOR_NIL)"))]
 
-         ;; embed-bytes: (embed-bytes bv) — explicit bytevector embedding
+         ;; embed-bytes: (embed-bytes bv) — raw bytevector as static data, no null terminator
          [(eq? h 'embed-bytes)
           (unless (and (fx= (length args) 1) (bytevector? (car args)))
-            (anchor-error "embed-bytes: expected a single bytevector"))
-          (emit-expr (car args) ctx pre)]
+            (anchor-error "embed-bytes: expected a single bytevector literal"))
+          (let* ([bv   (car args)]
+                 [tmp  (ctx-tmp! ctx)]
+                 [elts (let loop ([i 0] [acc '()])
+                         (if (fx= i (bytevector-length bv)) (reverse acc)
+                             (loop (fx+ i 1)
+                                   (cons (number->string (bytevector-u8-ref bv i)) acc))))]
+                 [decl (string-append "static const uint8_t " tmp "_bytes[] = {"
+                                      (str-join elts ", ") "};")])
+            (ctx-fwd-decls-set! ctx (append (ctx-fwd-decls ctx) (list decl)))
+            (string-append "anchor_ext((void*)" tmp "_bytes"))]
 
          ;; embed-string: (embed-string str) — null-terminated string as static data
          [(eq? h 'embed-string)
@@ -407,7 +375,6 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a) {
             (anchor-error "embed-string: expected a single string"))
           (let* ([s    (car args)]
                  [tmp  (ctx-tmp! ctx)]
-                 [len  (string-length s)]
                  [bv   (string->utf8 s)]
                  [elts (let loop ([i 0] [acc '()])
                          (if (fx= i (bytevector-length bv)) (reverse (cons "0" acc))
@@ -416,7 +383,7 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a) {
                  [decl (string-append "static const char " tmp "_str[] = {"
                                       (str-join elts ", ") "};")])
             (ctx-fwd-decls-set! ctx (append (ctx-fwd-decls ctx) (list decl)))
-            (string-append "anchor_ptr((void*)" tmp "_str, " (number->string len) ")"))]
+            (string-append "anchor_ext((void*)" tmp "_str)"))]
 
          ;; Arithmetic (left-fold for 2+ args)
          [(assq (id-sym h) *arith-ops*)
@@ -459,7 +426,7 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a) {
                 [iv (emit-expr (cadr args) ctx pre)])
             (cond
               [(pointer-type? ct)
-               (string-append "anchor_ptr((" ct ")" iv ".ptr, " iv ".size)")]
+               (string-append "anchor_ext((" ct ")_anch_ptr(" iv "))")]
               [(or (string=? ct "double") (string=? ct "float"))
                (string-append "anchor_float((double)_ANCH_FVAL(" iv "))")]
               [else
@@ -476,8 +443,8 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a) {
           (unless (fx= (length args) 1) (anchor-error "alloc: (alloc SIZE)"))
           (string-append "anchor_alloc(" (emit-size-expr (car args) ctx) ")")]
 
-         ;; sizeof — unified: Anchor struct/enum or C type
-         [(or (eq? h 'sizeof) (eq? h 'sizeof-struct))
+         ;; sizeof — Anchor struct/enum or C type
+         [(eq? h 'sizeof)
           (unless (fx= (length args) 1)
             (anchor-error "sizeof: (sizeof Name)"))
           (let ([arg (car args)])
@@ -493,12 +460,12 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a) {
          ;; (get ptr Type field ...)              — named chain (ptr before type)
          ;; (get ptr [i esz])                     — terminal indexed: scalar
          ;; (get ptr [i esz] Type field ...)      — indexed step then named chain
-         ;; ref / deref / ptr-add
+         ;; ref / deref
          [(eq? h 'ref)
           (unless (fx= (length args) 1) (anchor-error "ref: (ref expr)"))
           (let* ([iv (emit-expr (car args) ctx pre)] [tmp (ctx-tmp! ctx)])
             (pre-add! pre (string-append "AnchorVal " tmp "_base = " iv ";"))
-            (string-append "((AnchorVal){(void*)&" tmp "_base, sizeof(AnchorVal)})"))]
+            (string-append "anchor_ext((void*)&" tmp "_base)"))]
 
          [(eq? h 'deref)
           (unless (fx= (length args) 1) (anchor-error "deref: (deref expr)"))
@@ -514,15 +481,15 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a) {
                                 (anchor-error "deref/%addr-offset: unknown struct" sn))]
                      [tmp   (ctx-tmp! ctx)])
                 (pre-add! pre (string-append "AnchorVal " tmp ";"))
-                (pre-add! pre (string-append "__builtin_memcpy(&" tmp ", (char*)" ptr-e ".ptr + ANCHOR_OFFSET_" csn "_" cfn ", sizeof(AnchorVal));"))
+                (pre-add! pre (string-append "__builtin_memcpy(&" tmp ", (char*)_ANCH_HPTR(" ptr-e ") + ANCHOR_OFFSET_" csn "_" cfn ", sizeof(AnchorVal));"))
                 tmp)
               (let* ([a   (emit-expr arg ctx pre)]
                      [tmp (ctx-tmp! ctx)])
                 (pre-add! pre (string-append "AnchorVal " tmp ";"))
-                (pre-add! pre (string-append "__builtin_memcpy(&" tmp ", " a ".ptr, sizeof(AnchorVal));"))
+                (pre-add! pre (string-append "__builtin_memcpy(&" tmp ", _ANCH_HPTR(" a "), sizeof(AnchorVal));"))
                 tmp)))]
 
-         ;; %addr-offset — navigate one struct field, return fat ptr to location
+         ;; %addr-offset — navigate one struct field, return address of field
          ;; (%addr-offset ptr Struct field)
          [(eq? h '%addr-offset)
           (unless (fx= (length args) 3)
@@ -535,155 +502,146 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a) {
                  [_     (or (hashtable-ref (ctx-structs ctx) sn #f)
                             (anchor-error "%addr-offset: unknown struct" sn))]
                  [tmp   (ctx-tmp! ctx)])
-            (pre-add! pre (string-append "AnchorVal " tmp " = (AnchorVal){(void*)((char*)" ptr-e ".ptr + ANCHOR_OFFSET_" csn "_" cfn "), ANCHOR_SIZE_" csn "_" cfn "};"))
+            (pre-add! pre (string-append "AnchorVal " tmp " = " ptr-e " + ANCHOR_OFFSET_" csn "_" cfn ";"))
             tmp)]
 
-         ;; %scalar — read .size bytes from .ptr (defaults to 8 if size == 0)
-         ;; (%scalar addr)
-         ;; Fast path: if addr is (%addr-offset ptr S f), skip intermediate AnchorVal
-         ;; and ternary — use ANCHOR_SIZE_S_f directly (compile-time constant).
+         ;; %scalar — read scalar from pointer address
+         ;; Fast path: if addr is (%addr-offset ptr S f), use ANCHOR_SIZE_S_f directly.
          [(eq? h '%scalar)
+          ;; Load an AnchorVal (8 bytes) from a struct field or raw address.
+          ;; In the 8-byte system every struct field IS an AnchorVal — just memcpy it.
           (unless (fx= (length args) 1) (anchor-error "%scalar: (%scalar addr)"))
           (let ([arg (car args)])
-            (if (and (pair? arg) (eq? (car arg) '%addr-offset))
-              (let* ([ao    (cdr arg)]
-                     [ptr-e (emit-expr (car ao) ctx pre)]
-                     [sn    (id-sym (cadr ao))]
-                     [fn    (id-sym (caddr ao))]
-                     [csn   (c-ident sn)]
-                     [cfn   (c-ident fn)]
-                     [_     (or (hashtable-ref (ctx-structs ctx) sn #f)
-                                (anchor-error "%scalar/%addr-offset: unknown struct" sn))]
-                     [tmp   (ctx-tmp! ctx)])
-                (pre-add! pre (string-append "intptr_t " tmp "_raw = 0;"))
-                (pre-add! pre (string-append "__builtin_memcpy(&" tmp "_raw, (char*)" ptr-e ".ptr + ANCHOR_OFFSET_" csn "_" cfn ", ANCHOR_SIZE_" csn "_" cfn ");"))
-                (pre-add! pre (string-append "AnchorVal " tmp " = anchor_int((intptr_t)" tmp "_raw);"))
-                tmp)
-              (let* ([a   (emit-expr arg ctx pre)]
-                     [tmp (ctx-tmp! ctx)])
-                (pre-add! pre (string-append "intptr_t " tmp "_raw = 0;"))
-                (pre-add! pre (string-append "__builtin_memcpy(&" tmp "_raw, " a ".ptr, " a ".size == 0 ? 8 : " a ".size);"))
-                (pre-add! pre (string-append "AnchorVal " tmp " = anchor_int((intptr_t)" tmp "_raw);"))
-                tmp)))]
+            (cond
+              [(and (pair? arg) (eq? (car arg) '%addr-offset))
+               (let* ([ao    (cdr arg)]
+                      [inner (car ao)]
+                      [sn    (id-sym (cadr ao))]
+                      [fn    (id-sym (caddr ao))]
+                      [csn   (c-ident sn)]
+                      [cfn   (c-ident fn)]
+                      [_     (or (hashtable-ref (ctx-structs ctx) sn #f)
+                                 (anchor-error "%scalar/%addr-offset: unknown struct" sn))]
+                      [tmp   (ctx-tmp! ctx)])
+                 (if (and (pair? inner) (eq? (car inner) '%ptr+))
+                   ;; two-level fast path: (%scalar (%addr-offset (%ptr+ base off) S f))
+                   ;; emit _ANCH_HPTR(base) + _ANCH_IVAL(off) + FIELD — base is loop-hoistable
+                   (let* ([base-e (emit-expr (cadr inner) ctx pre)]
+                          [off-e  (emit-expr (caddr inner) ctx pre)])
+                     (pre-add! pre (string-append "AnchorVal " tmp " = 0;"))
+                     (pre-add! pre (string-append "__builtin_memcpy(&" tmp ", (char*)_ANCH_HPTR(" base-e ") + _ANCH_IVAL(" off-e ") + ANCHOR_OFFSET_" csn "_" cfn ", ANCHOR_SIZE_" csn "_" cfn ");"))
+                     tmp)
+                   ;; single-level fast path: (%scalar (%addr-offset base S f))
+                   (let ([ptr-e (emit-expr inner ctx pre)])
+                     (pre-add! pre (string-append "AnchorVal " tmp " = 0;"))
+                     (pre-add! pre (string-append "__builtin_memcpy(&" tmp ", (char*)_ANCH_HPTR(" ptr-e ") + ANCHOR_OFFSET_" csn "_" cfn ", ANCHOR_SIZE_" csn "_" cfn ");"))
+                     tmp)))]
+              [(and (pair? arg) (eq? (car arg) '%ptr+))
+               (let* ([ro    (cdr arg)]
+                      [ptr-e (emit-expr (car ro) ctx pre)]
+                      [off-e (emit-expr (cadr ro) ctx pre)]
+                      [tmp   (ctx-tmp! ctx)])
+                 (pre-add! pre (string-append "AnchorVal " tmp " = 0;"))
+                 (pre-add! pre (string-append "__builtin_memcpy(&" tmp ", (char*)_ANCH_HPTR(" ptr-e ") + _ANCH_IVAL(" off-e "), 8);"))
+                 tmp)]
+              [else
+               (let* ([a   (emit-expr arg ctx pre)]
+                      [tmp (ctx-tmp! ctx)])
+                 (pre-add! pre (string-append "AnchorVal " tmp " = 0;"))
+                 (pre-add! pre (string-append "__builtin_memcpy(&" tmp ", _ANCH_HPTR(" a "), 8);"))
+                 tmp)]))]
 
          ;; %store — write AnchorVal to address
          ;; (%store addr val)
          [(eq? h '%store)
           (unless (fx= (length args) 2) (anchor-error "%store: (%store addr val)"))
           (let ([addr-arg (car args)] [val-arg (cadr args)])
-            (if (and (pair? addr-arg) (eq? (car addr-arg) '%addr-offset))
-              (let* ([ao    (cdr addr-arg)]
-                     [ptr-e (emit-expr (car ao) ctx pre)]
-                     [sn    (id-sym (cadr ao))]
-                     [fn    (id-sym (caddr ao))]
-                     [csn   (c-ident sn)]
-                     [cfn   (c-ident fn)]
-                     [_     (or (hashtable-ref (ctx-structs ctx) sn #f)
-                                (anchor-error "%store/%addr-offset: unknown struct" sn))]
-                     [v     (emit-expr val-arg ctx pre)]
-                     [tmp   (ctx-tmp! ctx)])
-                (pre-add! pre (string-append "{ AnchorVal " tmp " = " v ";"))
-                (pre-add! pre (string-append "  __builtin_memcpy((char*)" ptr-e ".ptr + ANCHOR_OFFSET_" csn "_" cfn ", &" tmp ", sizeof(AnchorVal)); }"))
-                "ANCHOR_NIL")
-              (let* ([a   (emit-expr addr-arg ctx pre)]
-                     [v   (emit-expr val-arg ctx pre)]
-                     [tmp (ctx-tmp! ctx)])
-                (pre-add! pre (string-append "{ AnchorVal " tmp " = " v ";"))
-                (pre-add! pre (string-append "  __builtin_memcpy(" a ".ptr, &" tmp ", sizeof(AnchorVal)); }"))
-                "ANCHOR_NIL")))]
+            (cond
+              [(and (pair? addr-arg) (eq? (car addr-arg) '%addr-offset))
+               (let* ([ao    (cdr addr-arg)]
+                      [ptr-e (emit-expr (car ao) ctx pre)]
+                      [sn    (id-sym (cadr ao))]
+                      [fn    (id-sym (caddr ao))]
+                      [csn   (c-ident sn)]
+                      [cfn   (c-ident fn)]
+                      [_     (or (hashtable-ref (ctx-structs ctx) sn #f)
+                                 (anchor-error "%store/%addr-offset: unknown struct" sn))]
+                      [v     (emit-expr val-arg ctx pre)]
+                      [tmp   (ctx-tmp! ctx)])
+                 (pre-add! pre (string-append "{ AnchorVal " tmp " = " v ";"))
+                 (pre-add! pre (string-append "  __builtin_memcpy((char*)_ANCH_HPTR(" ptr-e ") + ANCHOR_OFFSET_" csn "_" cfn ", &" tmp ", sizeof(AnchorVal)); }"))
+                 "ANCHOR_NIL")]
+              [(and (pair? addr-arg) (eq? (car addr-arg) '%ptr+))
+               (let* ([ro    (cdr addr-arg)]
+                      [ptr-e (emit-expr (car ro) ctx pre)]
+                      [off-e (emit-expr (cadr ro) ctx pre)]
+                      [v     (emit-expr val-arg ctx pre)]
+                      [tmp   (ctx-tmp! ctx)])
+                 (pre-add! pre (string-append "{ AnchorVal " tmp " = " v ";"))
+                 (pre-add! pre (string-append "  __builtin_memcpy((char*)_ANCH_HPTR(" ptr-e ") + _ANCH_IVAL(" off-e "), &" tmp ", sizeof(AnchorVal)); }"))
+                 "ANCHOR_NIL")]
+              [else
+               (let* ([a   (emit-expr addr-arg ctx pre)]
+                      [v   (emit-expr val-arg ctx pre)]
+                      [tmp (ctx-tmp! ctx)])
+                 (pre-add! pre (string-append "{ AnchorVal " tmp " = " v ";"))
+                 (pre-add! pre (string-append "  __builtin_memcpy(_ANCH_HPTR(" a "), &" tmp ", sizeof(AnchorVal)); }"))
+                 "ANCHOR_NIL")]))]
 
-         ;; %load-ptr — read 8-byte raw C pointer from addr.ptr, return {ptr, 0}
-         [(eq? h '%load-ptr)
-          (unless (fx= (length args) 1) (anchor-error "%load-ptr: (%load-ptr addr)"))
-          (let ([arg (car args)])
-            (if (and (pair? arg) (eq? (car arg) '%addr-offset))
-              (let* ([ao    (cdr arg)]
-                     [ptr-e (emit-expr (car ao) ctx pre)]
-                     [sn    (id-sym (cadr ao))]
-                     [fn    (id-sym (caddr ao))]
-                     [csn   (c-ident sn)]
-                     [cfn   (c-ident fn)]
-                     [_     (or (hashtable-ref (ctx-structs ctx) sn #f)
-                                (anchor-error "%load-ptr/%addr-offset: unknown struct" sn))]
-                     [tmp   (ctx-tmp! ctx)])
-                (pre-add! pre (string-append "intptr_t " tmp "_raw = 0;"))
-                (pre-add! pre (string-append "__builtin_memcpy(&" tmp "_raw, (char*)" ptr-e ".ptr + ANCHOR_OFFSET_" csn "_" cfn ", 8);"))
-                (pre-add! pre (string-append "AnchorVal " tmp " = (AnchorVal){(void*)(uintptr_t)" tmp "_raw, 0};"))
-                tmp)
-              (let* ([a   (emit-expr arg ctx pre)]
-                     [tmp (ctx-tmp! ctx)])
-                (pre-add! pre (string-append "intptr_t " tmp "_raw = 0;"))
-                (pre-add! pre (string-append "__builtin_memcpy(&" tmp "_raw, " a ".ptr, 8);"))
-                (pre-add! pre (string-append "AnchorVal " tmp " = (AnchorVal){(void*)(uintptr_t)" tmp "_raw, 0};"))
-                tmp)))]
-
-         ;; resize — fat ptr at ptr+offset with explicit size
-         [(eq? h '%resize)
-          (unless (fx= (length args) 3) (anchor-error "%resize: (resize ptr offset size)"))
+         ;; %load-ptr — load an AnchorVal from a field and use it as the next base pointer.
+         ;; In the 8-byte system every field is an AnchorVal — same as %scalar.
+         ;; %ptr+ — advance pointer by byte offset.
+         [(eq? h '%ptr+)
+          (unless (fx= (length args) 2) (anchor-error "%ptr+: (%ptr+ ptr offset)"))
           (let ([p (emit-expr (car args) ctx pre)]
-                [o (emit-expr (cadr args) ctx pre)]
-                [s (emit-expr (caddr args) ctx pre)])
-            (string-append "((AnchorVal){(void*)((char*)" p ".ptr + _ANCH_IVAL(" o ")), (size_t)_ANCH_IVAL(" s ")})"))]
+                [o (emit-expr (cadr args) ctx pre)])
+            (string-append "(" p " + " o ")"))]
 
-         ;; %scalar-store — write addr.size bytes of val's scalar to addr.ptr
-         ;; Fast path: if addr is (%addr-offset ptr S f), use ANCHOR_SIZE_S_f directly.
+         ;; %scalar-store — write an AnchorVal into a struct field or raw address.
+         ;; In the 8-byte system every field holds a raw AnchorVal — just memcpy.
          [(eq? h '%scalar-store)
           (unless (fx= (length args) 2) (anchor-error "%scalar-store: (%scalar-store addr val)"))
           (let ([addr-arg (car args)] [val-arg (cadr args)])
-            (if (and (pair? addr-arg) (eq? (car addr-arg) '%addr-offset))
-              (let* ([ao    (cdr addr-arg)]
-                     [ptr-e (emit-expr (car ao) ctx pre)]
-                     [sn    (id-sym (cadr ao))]
-                     [fn    (id-sym (caddr ao))]
-                     [csn   (c-ident sn)]
-                     [cfn   (c-ident fn)]
-                     [_     (or (hashtable-ref (ctx-structs ctx) sn #f)
-                                (anchor-error "%scalar-store/%addr-offset: unknown struct" sn))]
-                     [v     (emit-expr val-arg ctx pre)]
-                     [tmp   (ctx-tmp! ctx)])
-                (pre-add! pre (string-append "{ intptr_t " tmp "_raw;"))
-                (pre-add! pre (string-append "  if (_ANCH_IS_UNBOXED(" v ")) { " tmp "_raw = _ANCH_IVAL(" v "); }"))
-                (pre-add! pre (string-append "  else { " tmp "_raw = (intptr_t)" v ".ptr; }"))
-                (pre-add! pre (string-append "  __builtin_memcpy((char*)" ptr-e ".ptr + ANCHOR_OFFSET_" csn "_" cfn ", &" tmp "_raw, ANCHOR_SIZE_" csn "_" cfn "); }"))
-                "ANCHOR_NIL")
-              (let* ([a   (emit-expr addr-arg ctx pre)]
-                     [v   (emit-expr val-arg ctx pre)]
-                     [tmp (ctx-tmp! ctx)])
-                (pre-add! pre (string-append "{ intptr_t " tmp "_raw;"))
-                (pre-add! pre (string-append "  if (_ANCH_IS_UNBOXED(" v ")) { " tmp "_raw = _ANCH_IVAL(" v "); }"))
-                (pre-add! pre (string-append "  else { " tmp "_raw = (intptr_t)" v ".ptr; }"))
-                (pre-add! pre (string-append "  __builtin_memcpy(" a ".ptr, &" tmp "_raw, " a ".size); }"))
-                "ANCHOR_NIL")))]
-
-         ;; %make-val — construct AnchorVal from two 8-byte field addresses (ptr, size)
-         [(eq? h '%make-val)
-          (unless (fx= (length args) 2) (anchor-error "%make-val: (%make-val ptr-addr size-addr)"))
-          (let* ([a1 (emit-expr (car args) ctx pre)]
-                 [a2 (emit-expr (cadr args) ctx pre)]
-                 [tmp (ctx-tmp! ctx)])
-            (pre-add! pre (string-append "intptr_t " tmp "_p = 0, " tmp "_s = 0;"))
-            (pre-add! pre (string-append "__builtin_memcpy(&" tmp "_p, " a1 ".ptr, 8);"))
-            (pre-add! pre (string-append "__builtin_memcpy(&" tmp "_s, " a2 ".ptr, 8);"))
-            (pre-add! pre (string-append "AnchorVal " tmp " = (AnchorVal){(void*)(uintptr_t)" tmp "_p, (size_t)" tmp "_s};"))
-            tmp)]
-
-         ;; %val-ptr — extract pointer part of AnchorVal as tagged integer
-         [(eq? h '%val-ptr)
-          (unless (fx= (length args) 1) (anchor-error "%val-ptr: (%val-ptr val)"))
-          (let ([v (emit-expr (car args) ctx pre)])
-            (string-append "anchor_int((intptr_t)(uintptr_t)" v ".ptr)"))]
-
-         ;; %val-size — extract size part of AnchorVal as tagged integer
-         [(eq? h '%val-size)
-          (unless (fx= (length args) 1) (anchor-error "%val-size: (%val-size val)"))
-          (let ([v (emit-expr (car args) ctx pre)])
-            (string-append "anchor_int((intptr_t)" v ".size)"))]
-
-         [(eq? h 'ptr-add)
-          (unless (fx= (length args) 2) (anchor-error "ptr-add: (ptr-add ptr n)"))
-          (let ([p (emit-expr (car args) ctx pre)]
-                [n (emit-expr (cadr args) ctx pre)])
-            (string-append "((AnchorVal){(void*)((char*)" p ".ptr + _ANCH_IVAL(" n ")), " p ".size - (size_t)_ANCH_IVAL(" n ")})"))]
+            (cond
+              [(and (pair? addr-arg) (eq? (car addr-arg) '%addr-offset))
+               (let* ([ao    (cdr addr-arg)]
+                      [inner (car ao)]
+                      [sn    (id-sym (cadr ao))]
+                      [fn    (id-sym (caddr ao))]
+                      [csn   (c-ident sn)]
+                      [cfn   (c-ident fn)]
+                      [_     (or (hashtable-ref (ctx-structs ctx) sn #f)
+                                 (anchor-error "%scalar-store/%addr-offset: unknown struct" sn))]
+                      [v     (emit-expr val-arg ctx pre)]
+                      [tmp   (ctx-tmp! ctx)])
+                 (if (and (pair? inner) (eq? (car inner) '%ptr+))
+                   ;; two-level fast path
+                   (let* ([base-e (emit-expr (cadr inner) ctx pre)]
+                          [off-e  (emit-expr (caddr inner) ctx pre)])
+                     (pre-add! pre (string-append "{ AnchorVal " tmp " = " v ";"))
+                     (pre-add! pre (string-append "  __builtin_memcpy((char*)_ANCH_HPTR(" base-e ") + _ANCH_IVAL(" off-e ") + ANCHOR_OFFSET_" csn "_" cfn ", &" tmp ", ANCHOR_SIZE_" csn "_" cfn "); }"))
+                     "ANCHOR_NIL")
+                   ;; single-level fast path
+                   (let ([ptr-e (emit-expr inner ctx pre)])
+                     (pre-add! pre (string-append "{ AnchorVal " tmp " = " v ";"))
+                     (pre-add! pre (string-append "  __builtin_memcpy((char*)_ANCH_HPTR(" ptr-e ") + ANCHOR_OFFSET_" csn "_" cfn ", &" tmp ", ANCHOR_SIZE_" csn "_" cfn "); }"))
+                     "ANCHOR_NIL")))]
+              [(and (pair? addr-arg) (eq? (car addr-arg) '%ptr+))
+               (let* ([ro    (cdr addr-arg)]
+                      [ptr-e (emit-expr (car ro) ctx pre)]
+                      [off-e (emit-expr (cadr ro) ctx pre)]
+                      [v     (emit-expr val-arg ctx pre)]
+                      [tmp   (ctx-tmp! ctx)])
+                 (pre-add! pre (string-append "{ AnchorVal " tmp " = " v ";"))
+                 (pre-add! pre (string-append "  __builtin_memcpy((char*)_ANCH_HPTR(" ptr-e ") + _ANCH_IVAL(" off-e "), &" tmp ", sizeof(AnchorVal)); }"))
+                 "ANCHOR_NIL")]
+              [else
+               (let* ([a   (emit-expr addr-arg ctx pre)]
+                      [v   (emit-expr val-arg ctx pre)]
+                      [tmp (ctx-tmp! ctx)])
+                 (pre-add! pre (string-append "{ AnchorVal " tmp " = " v ";"))
+                 (pre-add! pre (string-append "  __builtin_memcpy(_ANCH_HPTR(" a "), &" tmp ", sizeof(AnchorVal)); }"))
+                 "ANCHOR_NIL")]))]
 
          ;; if as expression
          [(eq? h 'if)
@@ -719,10 +677,9 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a) {
                 tmp))]
 
          ;; fn-ptr: take the address of a named Anchor function as an AnchorVal.
-         ;; Use void* as the FFI param type when passing to C callbacks.
          [(eq? h 'fn-ptr)
           (unless (fx= (length args) 1) (anchor-error "fn-ptr: (fn-ptr name)"))
-          (string-append "anchor_ptr((void*)" (c-ident (car args)) ", 0)")]
+          (string-append "anchor_ext((void*)" (c-ident (car args)) ")")]
 
          ;; call-ptr: call through a function pointer stored in an AnchorVal.
          ;; (call-ptr fp arg ...) — AnchorVal ABI only (fn functions).
@@ -732,7 +689,7 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a) {
                  [c-args     (map (lambda (a) (emit-expr a ctx pre)) (cdr args))]
                  [param-types (if (null? c-args) "void"
                                   (str-join (map (lambda (_) "AnchorVal") c-args) ", "))]
-                 [fn-cast    (string-append "((AnchorVal(*)(" param-types "))" fp ".ptr)")])
+                 [fn-cast    (string-append "((AnchorVal(*)(" param-types "))_anch_ptr(" fp "))")])
             (string-append fn-cast "(" (str-join c-args ", ") ")"))]
 
          ;; call-ptr-c: call through a C-typed function pointer.
@@ -750,7 +707,7 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a) {
                  [fp        (emit-expr fp-expr ctx pre)]
                  [ptypes    (parse-ffi-params params)]
                  [ptypes-s  (if (null? ptypes) "void" (str-join ptypes ", "))]
-                 [fn-cast   (string-append "((" ret-str "(*)(" ptypes-s "))" fp ".ptr)")]
+                 [fn-cast   (string-append "((" ret-str "(*)(" ptypes-s "))_anch_ptr(" fp "))")]
                  [c-args    (let loop ([as call-args] [i 0] [acc '()])
                               (if (null? as) (reverse acc)
                                   (loop (cdr as) (fx+ i 1)
@@ -788,7 +745,7 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a) {
   (cond
     [(not arg) 8]
     [(and (number? arg) (exact? arg)) (exact arg)]
-    [(and (pair? arg) (memv (id-sym (car arg)) '(sizeof sizeof-struct)))
+    [(and (pair? arg) (memv (id-sym (car arg)) '(sizeof)))
      (let ([n (id-sym (cadr arg))])
        (or (struct-total-size ctx n)
            (anchor-error "sizeof: unknown struct" n)))]
@@ -797,7 +754,7 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a) {
 (define (emit-size-expr node ctx)
   (cond
     [(and (number? node) (exact? node)) (number->string node)]
-    [(and (pair? node) (memv (id-sym (car node)) '(sizeof sizeof-struct)))
+    [(and (pair? node) (memv (id-sym (car node)) '(sizeof)))
      (let ([arg (cadr node)])
        (cond
          [(hashtable-ref (ctx-structs ctx) (id-sym arg) #f)
@@ -821,7 +778,7 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a) {
            (pre-add! pre (string-append "AnchorVal " tmp " = anchor_float((double)" tmp "_raw);"))]
           [(pointer-type? ret)
            (pre-add! pre (string-append ret " " tmp "_raw = " call ";"))
-           (pre-add! pre (string-append "AnchorVal " tmp " = anchor_ptr((void*)" tmp "_raw, 0);"))]
+           (pre-add! pre (string-append "AnchorVal " tmp " = anchor_ext((void*)" tmp "_raw);"))]
           [else
            (pre-add! pre (string-append ret " " tmp "_raw = " call ";"))
            (pre-add! pre (string-append "AnchorVal " tmp " = anchor_int((intptr_t)" tmp "_raw);"))])
@@ -849,14 +806,14 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a) {
          (let* ([ct (cast-type-str (cadr node))]
                 [iv (emit-expr (caddr node) ctx pre)])
            (cond
-             [(pointer-type? ct) (string-append "((" ct ")" iv ".ptr)")]
+             [(pointer-type? ct) (string-append "((" ct ")_anch_ptr(" iv "))")]
              [(or (string=? ct "double") (string=? ct "float")) (string-append "_ANCH_FVAL(" iv ")")]
              [else (string-append "(" ct ")_ANCH_IVAL(" iv ")")]))]
         [else
          (let ([iv (emit-expr node ctx pre)])
            (if ptype
                (cond
-                 [(pointer-type? ptype) (string-append "((" ptype ")" iv ".ptr)")]
+                 [(pointer-type? ptype) (string-append "((" ptype ")_anch_ptr(" iv "))")]
                  [(or (string=? ptype "double") (string=? ptype "float")) (string-append "_ANCH_FVAL(" iv ")")]
                  [else (string-append "(" ptype ")_ANCH_IVAL(" iv ")")])
                iv))])))
@@ -929,30 +886,16 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a) {
                          (pre-emit! pre ctx)
                          (cond
                            [(string=? ret "AnchorVal")
-                            (if (and (ctx-in-arena? ctx) (not (ctx-arena-top-global? ctx)))
-                                (let ([tmp (ctx-tmp! ctx)])
-                                  (ctx-emit! ctx (string-append "AnchorVal " tmp "_inner = " e ";"))
-                                  (ctx-emit! ctx (string-append "if (_ANCH_IS_UNBOXED(" tmp "_inner)) {"))
-                                  (for-each (lambda (s) (ctx-emit! ctx (string-append "    " s))) (ctx-arena-cleanup ctx))
-                                  (ctx-emit! ctx (string-append "    return " tmp "_inner;"))
-                                  (ctx-emit! ctx "}")
-                                  (ctx-emit! ctx (string-append "size_t " tmp "_size = " tmp "_inner.size;"))
-                                  (ctx-emit! ctx (string-append "char* " tmp "_bytes = (char*)__builtin_malloc(" tmp "_size);"))
-                                  (ctx-emit! ctx (string-append "__builtin_memcpy(" tmp "_bytes, " tmp "_inner.ptr, " tmp "_size);"))
-                                  (for-each (lambda (s) (ctx-emit! ctx s)) (ctx-arena-cleanup ctx))
-                                  (ctx-emit! ctx (string-append "AnchorVal " tmp "_out = anchor_alloc(" tmp "_size);"))
-                                  (ctx-emit! ctx (string-append "__builtin_memcpy(" tmp "_out.ptr, " tmp "_bytes, " tmp "_size);"))
-                                  (ctx-emit! ctx (string-append "__builtin_free(" tmp "_bytes);"))
-                                  (ctx-emit! ctx (string-append "return " tmp "_out;")))
-                                (begin
-                                  (for-each (lambda (s) (ctx-emit! ctx s)) (ctx-arena-cleanup ctx))
-                                  (ctx-emit! ctx (string-append "return " e ";"))))]
+                            ;; AnchorVal is a raw uint64_t — return as-is.
+                            ;; Arena cleanup deactivates local arenas.
+                            (for-each (lambda (s) (ctx-emit! ctx s)) (ctx-arena-cleanup ctx))
+                            (ctx-emit! ctx (string-append "return " e ";"))]
                            [(string=? ret "void")
                             (for-each (lambda (s) (ctx-emit! ctx s)) (ctx-arena-cleanup ctx))
                             (ctx-emit! ctx "return;")]
                            [(pointer-type? ret)
                             (let ([tmp (ctx-tmp! ctx)])
-                              (ctx-emit! ctx (string-append ret " " tmp " = (" ret ")" e ".ptr;"))
+                              (ctx-emit! ctx (string-append ret " " tmp " = (" ret ")_anch_ptr(" e ");"))
                               (for-each (lambda (s) (ctx-emit! ctx s)) (ctx-arena-cleanup ctx))
                               (ctx-emit! ctx (string-append "return " tmp ";")))]
                            [else
@@ -1028,7 +971,7 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a) {
              (anchor-error "arena-reset!: (arena-reset! name)"))
            (let ([cname (hashtable-ref (ctx-global-arenas ctx) (id-sym (car args)) #f)])
              (unless cname (anchor-error "arena-reset!: not a declared global-arena" (car args)))
-             (ctx-emit! ctx (string-append cname ".used = 0;")))]
+             (ctx-emit! ctx (string-append "_anchor_arena_reset(&" cname ");")))]
 
           ;; extern-global
           [(eq? h 'extern-global)
@@ -1036,7 +979,7 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a) {
              (anchor-error "extern-global: (extern-global name)"))
            (ctx-fwd-decls-set! ctx
              (append (ctx-fwd-decls ctx)
-                     (list (string-append "extern AnchorVal " (c-ident (car args)) ";"))))]
+                     (list (string-append "extern AnchorVal " (c-ident (car args)) ";  /* = uint64_t */"))))]
 
           ;; ffi
           [(eq? h 'ffi)
@@ -1164,7 +1107,7 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a) {
       [(hashtable-ref (ctx-structs ctx) n #f) =>
        (lambda (tbl) (hashtable-ref tbl '_total #f))]
       [(hashtable-ref (ctx-enums ctx) n #f) => (lambda (_) 4)]
-      [else (anchor-error "sizeof-struct: unknown struct or enum" name)])))
+      [else (anchor-error "sizeof: unknown struct or enum" name)])))
 
 (define (resolve-field-size form ctx)
   ;; Returns the byte size of a struct field size spec:
@@ -1173,7 +1116,7 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a) {
   ;;   omitted           → default field size
   (cond
     [(number? form) (exact form)]
-    [(and (pair? form) (memv (id-sym (car form)) '(sizeof sizeof-struct)))
+    [(and (pair? form) (memv (id-sym (car form)) '(sizeof)))
      (unless (and (pair? (cdr form)) (sym? (cadr form)))
        (anchor-error "sizeof in struct field: expected (sizeof Name)"))
      (struct-total-size ctx (id-sym (cadr form)))]
@@ -1294,39 +1237,40 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a) {
     (ctx-indent! ctx)
     (when main2?
       (ctx-emit! ctx (string-append "AnchorVal " (c-ident (car params)) " = anchor_int(_argc_raw);"))
-      (ctx-emit! ctx (string-append "AnchorVal " (c-ident (cadr params)) " = anchor_ptr(_argv_raw, (size_t)_argc_raw * sizeof(char*));")))
+      (ctx-emit! ctx (string-append "AnchorVal " (c-ident (cadr params)) " = anchor_ext((void*)_argv_raw);")))
     (let ([old-ret   (ctx-fn-ret ctx)]
           [old-vd    (ctx-var-depth ctx)])
       (ctx-fn-ret-set! ctx ret)
       (ctx-var-depth-set! ctx (make-eq-hashtable))
       ;; Arena setup
-      (let ([av #f] [use-heap #f])
+      (let ([av #f] [use-heap #f] [has-arena #f])
         (cond
           [global-arena
-           ;; Link in an existing global arena for this function's allocations
            (set! av global-arena)
            (ctx-emit! ctx (string-append global-arena ".prev = _anchor_arena_top;"))
            (ctx-emit! ctx (string-append "_anchor_arena_top = &" global-arena ";"))
            (ctx-push-arena! ctx global-arena #t)
-           (ctx-arena-depth-set! ctx (fx+ (ctx-arena-depth ctx) 1))]
+           (ctx-arena-depth-set! ctx (fx+ (ctx-arena-depth ctx) 1))
+           (set! has-arena #t)]
           [arena-sz
            (set! av "_anc_arena")
            (let ([cap (if (and (number? arena-sz) (fx> arena-sz 0))
-                          (number->string arena-sz)
+                          (number->string (exact arena-sz))
                           "ANCHOR_DEFAULT_ARENA_CAP")])
              (set! use-heap (and (number? arena-sz) (fx> arena-sz 1048576)))
              (if use-heap
                  (ctx-emit! ctx (string-append "char* " av "_buf = (char*)__builtin_malloc(" cap ");"))
                  (ctx-emit! ctx (string-append "char " av "_buf[" cap "];")))
-             (ctx-emit! ctx (string-append "AnchorArena " av " = {(char*)" av "_buf, " cap ", 0, _anchor_arena_top};"))
+             (ctx-emit! ctx (string-append "_AnchorArena " av " = {" av "_buf, " cap ", 0, _anchor_arena_top};"))
              (ctx-emit! ctx (string-append "_anchor_arena_top = &" av ";"))
              (ctx-push-arena! ctx av #f)
-             (ctx-arena-depth-set! ctx (fx+ (ctx-arena-depth ctx) 1)))])
+             (ctx-arena-depth-set! ctx (fx+ (ctx-arena-depth ctx) 1))
+             (set! has-arena #t))])
         (for-each (lambda (s) (emit-stmt s ctx)) body)
         (let* ([last (and (pair? body) (list-ref body (fx- (length body) 1)))]
                [has-ret (and last (pair? last) (eq? (id-sym (car last)) 'return))])
           (unless has-ret
-            (when av
+            (when has-arena
               (if global-arena
                   (ctx-emit! ctx (string-append "_anchor_arena_top = " global-arena ".prev;"))
                   (begin
@@ -1335,7 +1279,7 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a) {
               (ctx-pop-arena! ctx)
               (ctx-arena-depth-set! ctx (fx- (ctx-arena-depth ctx) 1)))
             (ctx-emit! ctx (if (string=? ret "int") "return 0;" "return anchor_int(0);")))
-          (when (and has-ret av)
+          (when (and has-ret has-arena)
             (ctx-pop-arena! ctx)
             (ctx-arena-depth-set! ctx (fx- (ctx-arena-depth ctx) 1)))))
       (ctx-fn-ret-set! ctx old-ret)
@@ -1347,14 +1291,13 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a) {
   (let* ([items (cdr node)]
          [first (and (pair? items) (car items))])
     (cond
-      ;; (with-arena name body...) — use existing global arena, no alloc/reset
+      ;; (with-arena name body...) — use existing global arena
       [(and (sym? first) (not (number? first)))
        (let* ([name  first]
               [body  (cdr items)]
               [cname (hashtable-ref (ctx-global-arenas ctx) (id-sym name) #f)])
          (unless cname (anchor-error "with-arena: not a declared global-arena" name))
          (when (null? body) (anchor-error "with-arena: empty body"))
-         ;; If body is all fn/fn-c, attach the global arena to each function directly
          (if (for-all (lambda (f) (and (pair? f) (memv (id-sym (car f)) '(fn fn-c)))) body)
              (for-each (lambda (f)
                          (if (eq? (id-sym (car f)) 'fn-c)
@@ -1391,7 +1334,7 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a) {
                (if use-heap
                    (ctx-emit! ctx (string-append "char* " av "_buf = (char*)__builtin_malloc(" cap ");"))
                    (ctx-emit! ctx (string-append "char " av "_buf[" cap "];")))
-               (ctx-emit! ctx (string-append "AnchorArena " av " = {(char*)" av "_buf, " cap ", 0, _anchor_arena_top};"))
+               (ctx-emit! ctx (string-append "_AnchorArena " av " = {" av "_buf, " cap ", 0, _anchor_arena_top};"))
                (ctx-emit! ctx (string-append "_anchor_arena_top = &" av ";"))
                (ctx-push-arena! ctx av #f)
                (ctx-arena-depth-set! ctx (fx+ (ctx-arena-depth ctx) 1))
@@ -1404,35 +1347,37 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a) {
                (ctx-emit! ctx "}"))))])))
 
 (define (emit-with-parent-arena node ctx)
-  ;; (with-parent-arena body...) — direct allocations into the arena one level up.
-  ;; Saves _anchor_arena_top, sets it to its own ->prev, runs body, restores.
-  ;; On return inside the body, ctx-arena-cleanup emits the restore automatically.
+  ;; (with-parent-arena body...) — allocations go into the arena one level up.
+  ;; Saves _anchor_arena_top, sets it to top->prev, runs body, restores.
   (let ([body (cdr node)])
     (when (null? body) (anchor-error "with-parent-arena: empty body"))
     (let ([sv (string-append "_anc_psaved_" (ctx-tmp! ctx))])
       (ctx-emit! ctx "{")
       (ctx-indent! ctx)
-      (ctx-emit! ctx (string-append "AnchorArena* " sv " = _anchor_arena_top;"))
+      (ctx-emit! ctx (string-append "_AnchorArena* " sv " = _anchor_arena_top;"))
       (ctx-emit! ctx (string-append "_anchor_arena_top = _anchor_arena_top ? _anchor_arena_top->prev : NULL;"))
       (ctx-push-restore! ctx sv)
+      (ctx-arena-depth-set! ctx (fx+ (ctx-arena-depth ctx) 1))
       (for-each (lambda (s) (emit-stmt s ctx)) body)
       (ctx-emit! ctx (string-append "_anchor_arena_top = " sv ";"))
       (ctx-pop-arena! ctx)
+      (ctx-arena-depth-set! ctx (fx- (ctx-arena-depth ctx) 1))
       (ctx-dedent! ctx)
       (ctx-emit! ctx "}"))))
 
 (define (emit-global-arena node ctx)
-  ;; (global-arena name size)
-  (let* ([items (cdr node)]
-         [name  (car items)]
-         [size  (cadr items)]
-         [cname (string-append "_anc_ga_" (c-ident name))]
-         [cap   (number->string (exact size))])
+  ;; (global-arena name size) — static buffer, linked into arena stack at runtime
+  (let* ([items  (cdr node)]
+         [name   (car items)]
+         [size   (cadr items)]
+         [cap    (number->string (exact size))]
+         [cn     (c-ident name)]
+         [cname  (string-append "_anc_ga_" cn)])
     (hashtable-set! (ctx-global-arenas ctx) (id-sym name) cname)
     (ctx-globals-set! ctx
       (append (ctx-globals ctx)
-              (list (string-append "static char " cname "_buf[" cap "];"))
-              (list (string-append "static AnchorArena " cname
+              (list (string-append "static char " cname "_buf[" cap "];")
+                    (string-append "static _AnchorArena " cname
                                    " = {" cname "_buf, " cap ", 0, NULL};"))))))
 
 (define (emit-global node ctx const?)
@@ -1441,28 +1386,32 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a) {
          [expr  (caddr node)])
     (cond
       [(and (number? expr) (inexact? expr))
+       ;; Float: must use constructor since anchor_float is not a constant expression
        (ctx-globals-set! ctx
          (append (ctx-globals ctx)
-                 (list (string-append "AnchorVal " cname ";")
+                 (list (string-append "AnchorVal " cname " = 0;")
                        (string-append "__attribute__((constructor)) static void _anc_init_" cname
                                       "(void) { " cname " = anchor_float(" (number->string expr) "); }"))))]
       [(and (number? expr) (exact? expr))
+       ;; Integer: raw int64 — static initializer
        (ctx-globals-set! ctx
          (append (ctx-globals ctx)
                  (list (string-append (if const? "const " "") "AnchorVal " cname
-                                      " = { (void*)(uintptr_t)(intptr_t)" (number->string expr)
-                                      ", ANCHOR_UNBOXED };"))))]
+                                      " = (AnchorVal)(int64_t)"
+                                      (number->string expr) ";"))))]
       [(and (not const?) (pair? expr) (eq? (id-sym (car expr)) 'alloc)
             (pair? (cdr expr)) (number? (cadr expr)) (exact? (cadr expr)))
-       (let ([sz (cadr expr)])
+       (let* ([sz    (cadr expr)]
+              [ss    (number->string sz)])
          (ctx-globals-set! ctx
            (append (ctx-globals ctx)
-                   (list (string-append "static char _g_" cname "_storage[" (number->string sz) "];")
-                         (string-append "AnchorVal " cname " = { _g_" cname "_storage, "
-                                        (number->string sz) " };")))))]
+                   (list (string-append "static char _g_" cname "_storage[" ss "];")
+                         (string-append "AnchorVal " cname " = 0;")
+                         (string-append "__attribute__((constructor)) static void _anc_init_" cname
+                                        "(void) { " cname " = anchor_ext(_g_" cname "_storage); }")))))]
       [(and (not const?) (pair? expr) (eq? (id-sym (car expr)) 'alloc)
             (pair? (cdr expr)) (pair? (cadr expr))
-            (memv (id-sym (car (cadr expr))) '(sizeof sizeof-struct)))
+            (memv (id-sym (car (cadr expr))) '(sizeof)))
        (let* ([sz-expr  (cadr expr)]
               [sname    (cadr sz-expr)]
               [anc-sz   (let ([ht (hashtable-ref (ctx-structs ctx) (id-sym sname) #f)])
@@ -1473,8 +1422,9 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a) {
          (ctx-globals-set! ctx
            (append (ctx-globals ctx)
                    (list (string-append "static char _g_" cname "_storage[" sz "];")
-                         (string-append "AnchorVal " cname " = { _g_" cname "_storage, "
-                                        sz " };")))))]
+                         (string-append "AnchorVal " cname " = 0;")
+                         (string-append "__attribute__((constructor)) static void _anc_init_" cname
+                                        "(void) { " cname " = anchor_ext(_g_" cname "_storage); }")))))]
       [else
        (anchor-error (if const? "const: initializer must be a number"
                                 "global: initializer must be number or (alloc N) or (alloc (sizeof Name))"))])))
@@ -1528,41 +1478,48 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a) {
                        [raw    (string-append "_raw_" pname)]
                        [wrap   (if (pointer-type? c-type)
                                    (string-append "AnchorVal " pname
-                                                  " = anchor_ptr((void*)" raw ", 0);")
+                                                  " = anchor_ext((void*)" raw ");")
                                    (string-append "AnchorVal " pname
                                                   " = anchor_int((intptr_t)" raw ");"))])
                   (ctx-emit! ctx wrap)))
               parsed)
     ;; Optional arena setup (when wrapped in with-arena)
-    (cond
-      [global-arena
-       (ctx-emit! ctx (string-append global-arena ".prev = _anchor_arena_top;"))
-       (ctx-emit! ctx (string-append "_anchor_arena_top = &" global-arena ";"))
-       (ctx-push-arena! ctx global-arena #t)
-       (ctx-arena-depth-set! ctx (fx+ (ctx-arena-depth ctx) 1))]
-      [arena-sz
-       (let* ([cap (if (and (number? arena-sz) (fx> arena-sz 0))
-                       (number->string arena-sz)
-                       "ANCHOR_DEFAULT_ARENA_CAP")]
-              [use-heap (and (number? arena-sz) (fx> arena-sz 1048576))]
-              [av "_anc_arena"])
-         (if use-heap
-             (ctx-emit! ctx (string-append "char* " av "_buf = (char*)__builtin_malloc(" cap ");"))
-             (ctx-emit! ctx (string-append "char " av "_buf[" cap "];")))
-         (ctx-emit! ctx (string-append "AnchorArena " av " = {(char*)" av "_buf, " cap ", 0, _anchor_arena_top};"))
-         (ctx-emit! ctx (string-append "_anchor_arena_top = &" av ";"))
-         (ctx-push-arena! ctx av #f)
-         (ctx-arena-depth-set! ctx (fx+ (ctx-arena-depth ctx) 1)))])
+    (let ([av #f] [use-heap #f])
+      (cond
+        [global-arena
+         (set! av global-arena)
+         (ctx-emit! ctx (string-append global-arena ".prev = _anchor_arena_top;"))
+         (ctx-emit! ctx (string-append "_anchor_arena_top = &" global-arena ";"))
+         (ctx-push-arena! ctx global-arena #t)
+         (ctx-arena-depth-set! ctx (fx+ (ctx-arena-depth ctx) 1))]
+        [arena-sz
+         (set! av "_anc_arena")
+         (let ([cap (if (and (number? arena-sz) (fx> arena-sz 0))
+                        (number->string arena-sz)
+                        "ANCHOR_DEFAULT_ARENA_CAP")])
+           (set! use-heap (and (number? arena-sz) (fx> arena-sz 1048576)))
+           (if use-heap
+               (ctx-emit! ctx (string-append "char* " av "_buf = (char*)__builtin_malloc(" cap ");"))
+               (ctx-emit! ctx (string-append "char " av "_buf[" cap "];")))
+           (ctx-emit! ctx (string-append "_AnchorArena " av " = {" av "_buf, " cap ", 0, _anchor_arena_top};"))
+           (ctx-emit! ctx (string-append "_anchor_arena_top = &" av ";"))
+           (ctx-push-arena! ctx av #f)
+           (ctx-arena-depth-set! ctx (fx+ (ctx-arena-depth ctx) 1)))])
     ;; Emit body; ctx-fn-ret set so return emits the right C cast
     (let ([prev-ret (ctx-fn-ret ctx)])
       (ctx-fn-ret-set! ctx ret-str)
       (for-each (lambda (s) (emit-stmt s ctx)) body)
       (ctx-fn-ret-set! ctx prev-ret))
     (when (or arena-sz global-arena)
+      (if global-arena
+          (ctx-emit! ctx (string-append "_anchor_arena_top = " global-arena ".prev;"))
+          (begin
+            (ctx-emit! ctx (string-append "_anchor_arena_top = " av ".prev;"))
+            (when use-heap (ctx-emit! ctx (string-append "__builtin_free(" av "_buf);")))))
       (ctx-pop-arena! ctx)
       (ctx-arena-depth-set! ctx (fx- (ctx-arena-depth ctx) 1)))
     (ctx-dedent! ctx)
-    (ctx-emit! ctx "}"))))
+    (ctx-emit! ctx "}")))))
 
 ;; ---------------------------------------------------------------------------
 ;; Entry point

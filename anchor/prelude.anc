@@ -3,35 +3,30 @@
 (define-syntax gb (macro-case () [(_ n) (* n 1024 1024 1024)]))
 
 ;; ---------------------------------------------------------------------------
-;; get — unified read form
+;; get — read a value, navigating through byte offsets and struct fields
+;; aref — same navigation, but return the address instead of the value
 ;;
-;; Terminal reads:
-;;   (get ptr S f)           scalar field read
-;;   (get ptr S (val f))     AnchorVal field read (16 bytes)
-;;   (get ptr S (val f1 f2)) AnchorVal from two 8-byte fields (ptr, size)
-;;   (get ptr S)             fat ptr sized to sizeof(S)
+;; Shared navigation forms (both get and aref support):
+;;   (get/aref ptr off rest ...)       byte-offset step, then continue
+;;   (get/aref ptr off -> rest ...)    byte-offset step, follow pointer, continue
+;;   (get/aref ptr S f S2 rest ...)    struct chain (embedded struct)
+;;   (get/aref ptr S f -> rest ...)    follow pointer stored in field
 ;;
-;; Navigation:
-;;   (get ptr S f S2 ...)    embedded struct chain
-;;   (get ptr S f -> rest)   follow raw C pointer in field
-;;   (get ptr S f sz rest)   size override: {ptr+off, sz}
-;;   (get ptr off rest)      byte-offset first step
+;; Terminals:
+;;   (get ptr S f)    read value of field f         ← get only
+;;   (aref ptr S f)   return address of field f     ← aref only
+;;   (aref ptr S)     return address of struct       ← aref only
+;;   (get ptr)        bare scalar deref
+;;   (aref ptr)       ptr itself (bare address)
+;;
+;; Example:
+;;   (get  arr (* i (sizeof Point)) Point x)   ; read x of element i
+;;   (aref arr (* i (sizeof Point)) Point x)   ; address of x in element i
+;;   (aref arr (* i (sizeof Point)) Point)     ; address of element i
 ;; ---------------------------------------------------------------------------
 
 (define-syntax get
-  (macro-case (val ->)
-    ;; AnchorVal from two 8-byte fields: (get ptr S (val f1 f2))
-    [(_ ptr S (val f1 f2))
-     (is-struct? S)
-     `(%make-val (%addr-offset ,ptr ,S ,f1) (%addr-offset ,ptr ,S ,f2))]
-    ;; AnchorVal terminal: (get ptr S (val f))
-    [(_ ptr S (val f))
-     (is-struct? S)
-     `(deref (%addr-offset ,ptr ,S ,f))]
-    ;; type terminal: (get ptr S) — fat ptr sized to sizeof(S)
-    [(_ ptr S)
-     (is-struct? S)
-     `(%resize ,ptr 0 (sizeof ,S))]
+  (macro-case (->)
     ;; scalar terminal: (get ptr S f)
     [(_ ptr S f)
      (is-struct? S)
@@ -39,48 +34,66 @@
     ;; pointer follow: (get ptr S f -> rest ...)
     [(_ ptr S f -> rest ...)
      (is-struct? S)
-     `(get (%load-ptr (%addr-offset ,ptr ,S ,f)) ,@rest)]
-    ;; embedded struct chain: (get ptr S f S2 rest ...) both S S2 are structs
+     `(get (%scalar (%addr-offset ,ptr ,S ,f)) ,@rest)]
+    ;; embedded struct chain: (get ptr S f S2 rest ...)
     [(_ ptr S f S2 rest ...)
      (and (is-struct? S) (is-struct? S2))
      `(get (%addr-offset ,ptr ,S ,f) ,S2 ,@rest)]
-    ;; size override after field: (get ptr S f sz rest ...) sz not struct
-    [(_ ptr S f sz rest ...)
-     (and (is-struct? S) (not (is-struct? sz)))
-     `(get (%resize (%addr-offset ,ptr ,S ,f) 0 ,sz) ,@rest)]
     ;; byte-offset + pointer follow: (get ptr off -> rest ...)
     [(_ ptr off -> rest ...)
-     `(get (%load-ptr (%resize ,ptr ,off 8)) ,@rest)]
-    ;; byte-offset + rest: (get ptr off rest ...)
+     `(get (%scalar (%ptr+ ,ptr ,off)) ,@rest)]
+    ;; byte-offset step: (get ptr off rest ...)
     [(_ ptr off rest ...)
      (not (is-struct? off))
-     `(get (%resize ,ptr ,off 0) ,@rest)]
+     `(get (%ptr+ ,ptr ,off) ,@rest)]
     ;; bare pointer: scalar read
     [(_ ptr)
      `(%scalar ,ptr)]))
 
+(define-syntax aref
+  (macro-case (->)
+    ;; field address terminal: (aref ptr S f) — address of field f
+    [(_ ptr S f)
+     (is-struct? S)
+     `(%addr-offset ,ptr ,S ,f)]
+    ;; struct address terminal: (aref ptr S) — address of struct at ptr
+    [(_ ptr S)
+     (is-struct? S)
+     ptr]
+    ;; pointer follow: (aref ptr S f -> rest ...)
+    [(_ ptr S f -> rest ...)
+     (is-struct? S)
+     `(aref (%scalar (%addr-offset ,ptr ,S ,f)) ,@rest)]
+    ;; embedded struct chain: (aref ptr S f S2 rest ...)
+    [(_ ptr S f S2 rest ...)
+     (and (is-struct? S) (is-struct? S2))
+     `(aref (%addr-offset ,ptr ,S ,f) ,S2 ,@rest)]
+    ;; byte-offset + pointer follow: (aref ptr off -> rest ...)
+    [(_ ptr off -> rest ...)
+     `(aref (%scalar (%ptr+ ,ptr ,off)) ,@rest)]
+    ;; byte-offset step: (aref ptr off rest ...)
+    [(_ ptr off rest ...)
+     (not (is-struct? off))
+     `(aref (%ptr+ ,ptr ,off) ,@rest)]
+    ;; bare pointer: address is the pointer itself
+    [(_ ptr)
+     ptr]))
+
 ;; ---------------------------------------------------------------------------
-;; set! — unified write form
+;; set! — write a value
+;;
+;;   (set! x v)            variable rebind
+;;   (set! ptr S f v)      write field f of struct S at ptr
+;;   (set! ptr S f -> ...) follow pointer then write
+;;   (set! ptr S f S2 ...) struct chain write
 ;; ---------------------------------------------------------------------------
 
 (define-syntax set!
-  (macro-case (val ->)
+  (macro-case (->)
     ;; variable rebind: (set! x v)
     [(_ x v)
      (not (is-struct? x))
      `(set-var! ,x ,v)]
-    ;; indexed AnchorVal slot write: (set! ptr ((val i)) v)
-    [(_ ptr ((val i)) v)
-     `(%store (%resize ,ptr (* ,i 16) 16) ,v)]
-    ;; AnchorVal split-field write: (set! ptr S (val f1 f2) v)
-    [(_ ptr S (val f1 f2) v)
-     (is-struct? S)
-     `(do (%scalar-store (%addr-offset ,ptr ,S ,f1) (%val-ptr ,v))
-          (%scalar-store (%addr-offset ,ptr ,S ,f2) (%val-size ,v)))]
-    ;; AnchorVal field write: (set! ptr S (val f) v)
-    [(_ ptr S (val f) v)
-     (is-struct? S)
-     `(%store (%addr-offset ,ptr ,S ,f) ,v)]
     ;; scalar terminal write: (set! ptr S f v)
     [(_ ptr S f v)
      (is-struct? S)
@@ -88,44 +101,40 @@
     ;; pointer follow then write: (set! ptr S f -> rest ...)
     [(_ ptr S f -> rest ...)
      (is-struct? S)
-     `(set! (%load-ptr (%addr-offset ,ptr ,S ,f)) ,@rest)]
+     `(set! (%scalar (%addr-offset ,ptr ,S ,f)) ,@rest)]
     ;; embedded struct chain write: (set! ptr S f S2 rest ...)
     [(_ ptr S f S2 rest ...)
      (and (is-struct? S) (is-struct? S2))
      `(set! (%addr-offset ,ptr ,S ,f) ,S2 ,@rest)]
-    ;; size override then write: (set! ptr S f sz rest ...)
-    [(_ ptr S f sz rest ...)
-     (and (is-struct? S) (not (is-struct? sz)))
-     `(set! (%resize (%addr-offset ,ptr ,S ,f) 0 ,sz) ,@rest)]
-    ;; raw byte-offset write: (set! ptr off v) off not struct
-    [(_ ptr off v)
-     (not (is-struct? off))
-     `(%scalar-store (%resize ,ptr ,off 8) ,v)]
-    ;; byte-offset then pointer follow
+    ;; byte-offset + pointer follow: (set! ptr off -> rest ...)
     [(_ ptr off -> rest ...)
      (not (is-struct? off))
-     `(set! (%load-ptr (%resize ,ptr ,off 8)) ,@rest)]
-    ;; byte-offset then struct chain
+     `(set! (%scalar (%ptr+ ,ptr ,off)) ,@rest)]
+    ;; byte-offset terminal write: (set! ptr off v) — raw scalar store
+    [(_ ptr off v)
+     (not (is-struct? off))
+     `(%scalar-store (%ptr+ ,ptr ,off) ,v)]
+    ;; byte-offset step: (set! ptr off rest ...) — navigate then continue
     [(_ ptr off rest ...)
      (not (is-struct? off))
-     `(set! (%resize ,ptr ,off 0) ,@rest)]))
+     `(set! (%ptr+ ,ptr ,off) ,@rest)]))
 
 ;; ---------------------------------------------------------------------------
 ;; Linked list
 ;; ---------------------------------------------------------------------------
 
-(struct Cons (car 16) (cdr 16))
+(struct Cons (car 8) (cdr 8))
 
 (define-syntax cons
   (syntax-rules ()
     [(_ a d)
      (do (let _c (alloc (sizeof Cons)))
-         (set! _c Cons (val car) a)
-         (set! _c Cons (val cdr) d)
+         (set! _c Cons car a)
+         (set! _c Cons cdr d)
          _c)]))
 
-(define-syntax car    (syntax-rules () [(_ lst) (get lst Cons (val car))]))
-(define-syntax cdr    (syntax-rules () [(_ lst) (get lst Cons (val cdr))]))
-(define-syntax null?  (syntax-rules () [(_ v)   (== (byte-size v) 0)]))
-(define-syntax set-car! (syntax-rules () [(_ lst v) (set! lst Cons (val car) v)]))
-(define-syntax set-cdr! (syntax-rules () [(_ lst v) (set! lst Cons (val cdr) v)]))
+(define-syntax car    (syntax-rules () [(_ lst) (get lst Cons car)]))
+(define-syntax cdr    (syntax-rules () [(_ lst) (get lst Cons cdr)]))
+(define-syntax null?  (syntax-rules () [(_ v)   (%null-check v)]))
+(define-syntax set-car! (syntax-rules () [(_ lst v) (set! lst Cons car v)]))
+(define-syntax set-cdr! (syntax-rules () [(_ lst v) (set! lst Cons cdr v)]))

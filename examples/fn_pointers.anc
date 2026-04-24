@@ -73,8 +73,8 @@
     ;; --- Part 2: qsort via fn-c callbacks ---
     (printf "\n=== qsort via fn-c ===\n")
     (let arr (alloc (* 6 8)))
-    (set! arr 0 42)
-    (set! arr 8  7)
+    (set! arr 0  42)
+    (set! arr 8   7)
     (set! arr 16 19)
     (set! arr 24  3)
     (set! arr 32 55)

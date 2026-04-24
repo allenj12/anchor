@@ -79,33 +79,23 @@
     (printf "West\n")))))
 
 ; ---------------------------------------------------------------------------
-; Dynamic slice — store a fat pointer (ptr + byte-size) in a struct field
+; Slice struct — store pointer + count (8 bytes each in new system)
 ; ---------------------------------------------------------------------------
 
-; Two patterns for preserving byte-size across a field boundary:
-;
-;   (val f)      — 16-byte field stores the full AnchorVal verbatim
-;   (val f1 f2)  — two 8-byte fields store ptr and size separately
-;                  (individually accessible, same round-trip guarantee)
-
 (struct Slice
-  (buf 16))   ; holds a complete AnchorVal — ptr and size both intact
-
-(struct Split
-  (data 8)
-  (len  8))   ; pointer in data, byte-size in len — individually readable too
+  (buf 8)   ; AnchorVal pointing to allocated buffer
+  (len 8))  ; AnchorVal integer: number of elements
 
 (fn make-slice (n)
   ; allocate n 8-byte slots and wrap in a Slice
   (let buf (alloc (* n 8)))
   (let s (alloc (sizeof Slice)))
-  (set! s Slice (val buf) buf)
+  (set! s Slice buf buf)
+  (set! s Slice len n)
   (return s))
 
 (fn slice-len (s)
-  ; recover full AnchorVal and divide by element size
-  (let v (get s Slice (val buf)))
-  (return (/ (byte-size v) 8)))
+  (return (get s Slice len)))
 
 ; ---------------------------------------------------------------------------
 ; Array of structs — N points, stride = sizeof Point
@@ -148,21 +138,14 @@
       (cast int (int-bits-as-float 0)))
 
     ; enum
-    (printf "directions: ")
+    (printf "direction: ")
     (direction-name (c-const Direction_North))
-    (printf "directions: ")
+    (printf "direction: ")
     (direction-name (c-const Direction_West))
 
-    ; fat pointer fields — (val ...) preserves byte-size across a struct boundary
+    ; slice struct
     (let sl (make-slice 6))
     (printf "slice len: %d\n" (cast int (slice-len sl)))
-
-    ; split variant: store buf in two separate 8-byte fields
-    (let sp (alloc (sizeof Split)))
-    (let raw (alloc (* 3 8)))
-    (set! sp Split (val data len) raw)
-    (let sv (get sp Split (val data len)))
-    (printf "split byte-size: %d\n" (cast int (byte-size sv)))
 
     ; array of structs
     (let n 4)
