@@ -264,6 +264,31 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
 (define (pre-list  p)  (reverse (car p)))
 (define (pre-emit! p ctx) (for-each (lambda (s) (ctx-emit! ctx s)) (pre-list p)))
 
+;; Split a pre item "TYPE name = EXPR;" into (cons "TYPE name;" "name = EXPR;").
+;; For block items "{ ... }" that are self-contained, returns (cons #f item)
+;; so they are re-emitted as-is (no outer declaration needed).
+(define (pre-item-split item)
+  (let ([n (string-length item)])
+    (if (and (fx> n 0) (char=? (string-ref item 0) #\{))
+        (cons #f item)
+        (let loop ([i 0])
+          (cond
+            [(fx>= (fx+ i 2) n) (cons #f item)]
+            [(and (char=? (string-ref item i)           #\space)
+                  (char=? (string-ref item (fx+ i 1))   #\=)
+                  (char=? (string-ref item (fx+ i 2))   #\space))
+             (let* ([before     (substring item 0 i)]
+                    [after      (substring item (fx+ i 3) n)]
+                    [name-start (let lp ([j (fx- (string-length before) 1)])
+                                  (if (fx< j 0) 0
+                                      (if (char=? (string-ref before j) #\space)
+                                          (fx+ j 1)
+                                          (lp (fx- j 1)))))]
+                    [name       (substring before name-start (string-length before))])
+               (cons (string-append before ";")
+                     (string-append name " = " after)))]
+            [else (loop (fx+ i 1))])))))
+
 ;; ---------------------------------------------------------------------------
 ;; Operator tables
 ;; ---------------------------------------------------------------------------
@@ -992,14 +1017,36 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
            (when (fx< (length args) 2) (anchor-error "while: (while cond body...)"))
            (let* ([pre    (make-pre)]
                   [cond-e (emit-expr (car args) ctx pre)])
-             (pre-emit! pre ctx)
-             (ctx-emit! ctx (string-append "while (_ANCH_IVAL(" cond-e ")) {"))
-             (ctx-indent! ctx)
-             (for-each (lambda (s) (emit-stmt s ctx)) (cdr args))
-             (when (pair? (pre-list pre))
-               (for-each (lambda (s) (ctx-emit! ctx s)) (pre-list pre)))
-             (ctx-dedent! ctx)
-             (ctx-emit! ctx "}"))]
+             (if (null? (pre-list pre))
+                 ;; Simple condition — no temporaries, plain while.
+                 (begin
+                   (ctx-emit! ctx (string-append "while (_ANCH_IVAL(" cond-e ")) {"))
+                   (ctx-indent! ctx)
+                   (for-each (lambda (s) (emit-stmt s ctx)) (cdr args))
+                   (ctx-dedent! ctx)
+                   (ctx-emit! ctx "}"))
+                 ;; Complex condition with temporaries.
+                 ;; Split each pre item "TYPE name = EXPR;" into a declaration
+                 ;; "TYPE name;" and an assignment "name = EXPR;" so we can:
+                 ;;   1. declare temps before the while
+                 ;;   2. assign them (initial evaluation)
+                 ;;   3. while (cond) { body; re-assign temps; }
+                 ;; This keeps the natural while(cond) form without shadowing.
+                 (let* ([splits  (map pre-item-split (pre-list pre))]
+                        [decls   (let loop ([ss splits] [acc '()])
+                                   (if (null? ss) (reverse acc)
+                                       (loop (cdr ss) (if (car (car ss))
+                                                          (cons (car (car ss)) acc)
+                                                          acc))))]
+                        [assigns (map cdr splits)])
+                   (for-each (lambda (d) (ctx-emit! ctx d)) decls)
+                   (for-each (lambda (a) (ctx-emit! ctx a)) assigns)
+                   (ctx-emit! ctx (string-append "while (_ANCH_IVAL(" cond-e ")) {"))
+                   (ctx-indent! ctx)
+                   (for-each (lambda (s) (emit-stmt s ctx)) (cdr args))
+                   (for-each (lambda (a) (ctx-emit! ctx a)) assigns)
+                   (ctx-dedent! ctx)
+                   (ctx-emit! ctx "}"))))]
 
           ;; break / continue
           [(eq? h 'break)    (ctx-emit! ctx "break;")]
@@ -1117,8 +1164,8 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
                                                                (ffi-param-type ptypes i))
                                                 acc))))])
                  (pre-emit! pre ctx)
-                 ;; Use bare symbol name (h), not c-ident of node head, so that
-                 ;; macro-introduced extern references emit the correct plain C name.
+                 ;; c-ident of the bare symbol (marks already stripped via id-sym),
+                 ;; so hyphens become underscores without adding mark suffixes.
                  (ctx-emit! ctx (string-append (symbol->string h) "(" (str-join c-args ", ") ");")))
                (let ([pre (make-pre)])
                  (let ([e (emit-expr node ctx pre)])
