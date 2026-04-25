@@ -167,15 +167,15 @@
 
 (define-syntax define-struct
   (macro-case ()
-    [(_ name (field size) ...)
+    [(self name (field size) ...)
      (let ([sname (symbol->string (id-sym name))])
        (with-syntax
-         ([make-name (string->symbol (string-append "make-" sname))]
+         ([make-name (datum->syntax self (string->symbol (string-append "make-" sname)))]
           [(pname ...) (map (lambda (f)
-                              (string->symbol (string-append "p_" (symbol->string (id-sym f)))))
+                              (datum->syntax self (string->symbol (string-append "p_" (symbol->string (id-sym f))))))
                             field)]
           [(aname ...) (map (lambda (f)
-                              (string->symbol (string-append sname "-" (symbol->string (id-sym f)))))
+                              (datum->syntax self (string->symbol (string-append sname "-" (symbol->string (id-sym f))))))
                             field)])
          #'(do
              (struct name (field size) ...)

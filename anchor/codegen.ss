@@ -210,14 +210,17 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
     (mutable globals      ctx-globals      ctx-globals-set!)
     (mutable arena-depth  ctx-arena-depth  ctx-arena-depth-set!)
     (mutable var-depth    ctx-var-depth    ctx-var-depth-set!)
-    (mutable global-arenas ctx-global-arenas ctx-global-arenas-set!)) ; sym → c-var (string)
+    (mutable global-arenas ctx-global-arenas ctx-global-arenas-set!) ; sym → c-var (string)
+    (mutable hoisted       ctx-hoisted       ctx-hoisted-set!)       ; lines hoisted to file scope
+    (mutable fns           ctx-fns           ctx-fns-set!))          ; sym → C-name string for known top-level fns
   (protocol
     (lambda (new)
       (lambda ()
         (new '() 0 0
              (make-eq-hashtable) (make-eq-hashtable) (make-eq-hashtable)
              '() #f '() '() 0
-             (make-eq-hashtable) (make-eq-hashtable))))))
+             (make-eq-hashtable) (make-eq-hashtable) '()
+             (make-eq-hashtable))))))
 
 (define (ctx-emit! ctx line)
   (ctx-lines-set! ctx
@@ -471,7 +474,7 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
               [(hashtable-ref (ctx-enums ctx) (id-sym arg) #f)
                "anchor_int(4)"]
               [(hashtable-ref (ctx-structs ctx) (id-sym arg) #f)
-               (string-append "anchor_int(ANCHOR_SIZEOF_" (c-ident arg) ")")]
+               (string-append "anchor_int(ANCHOR_SIZEOF_" (symbol->string (id-sym arg)) ")")]
               [else
                (string-append "anchor_int((intptr_t)sizeof(" (cast-type-str arg) "))")]))]
 
@@ -696,9 +699,12 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
                 tmp))]
 
          ;; fn-ptr: take the address of a named Anchor function as an AnchorVal.
+         ;; Use the registered C name so macro-introduced and user fns both resolve correctly.
          [(eq? h 'fn-ptr)
           (unless (fx= (length args) 1) (anchor-error "fn-ptr: (fn-ptr name)"))
-          (string-append "anchor_ext((void*)" (c-ident (car args)) ")")]
+          (let* ([sym (id-sym (car args))]
+                 [cn  (or (hashtable-ref (ctx-fns ctx) sym #f) (c-ident (car args)))])
+            (string-append "anchor_ext((void*)" cn ")"))]
 
          ;; call-ptr: call through a function pointer stored in an AnchorVal.
          ;; (call-ptr fp arg ...) — AnchorVal ABI only (fn functions).
@@ -739,18 +745,53 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
          [(or (symbol? h) (stx? h))
           (let* ([hs  (id-sym h)]
                  [ext (hashtable-ref (ctx-externs ctx) hs #f)])
-            (if ext
-                (let* ([ret    (car ext)]
-                       [ptypes (cdr ext)]
-                       [c-args (let loop ([as args] [i 0] [acc '()])
-                                 (if (null? as) (reverse acc)
-                                     (loop (cdr as) (fx+ i 1)
-                                           (cons (emit-call-arg (car as) ctx pre #t
-                                                                (ffi-param-type ptypes i))
-                                                 acc))))])
-                  (wrap-extern-ret (string-append (c-ident (car node)) "(" (str-join c-args ", ") ")") ret ctx pre))
-                (let ([c-args (map (lambda (a) (emit-call-arg a ctx pre #f #f)) args)])
-                  (string-append (c-ident (car node)) "(" (str-join c-args ", ") ")"))))]
+            (cond
+              ;; FFI extern — use typed C calling convention.
+              ;; Use the bare symbol name (hs), not c-ident of the call node, so that
+              ;; macro-introduced references (stx with marks) still emit the plain C name.
+              [ext
+               (let* ([ret    (car ext)]
+                      [ptypes (cdr ext)]
+                      [c-args (let loop ([as args] [i 0] [acc '()])
+                                (if (null? as) (reverse acc)
+                                    (loop (cdr as) (fx+ i 1)
+                                          (cons (emit-call-arg (car as) ctx pre #t
+                                                               (ffi-param-type ptypes i))
+                                                acc))))])
+                 (wrap-extern-ret (string-append (symbol->string hs) "(" (str-join c-args ", ") ")") ret ctx pre))]
+              ;; Known Anchor fn — direct call using the registered C name.
+              ;; This handles both plain user fns (registered as "my_fn") and
+              ;; macro-introduced fns (registered as "_helper_anc_1") correctly,
+              ;; regardless of whether the call site has marks on the head symbol.
+              [(hashtable-ref (ctx-fns ctx) hs #f)
+               => (lambda (cn)
+                    (let ([c-args (map (lambda (a) (emit-call-arg a ctx pre #f #f)) args)])
+                      (string-append cn "(" (str-join c-args ", ") ")")))]
+              ;; Unknown symbol — treat as lambda/closure value: (fn-ptr . env)
+              ;; Emit car/cdr directly via %scalar/%addr-offset to avoid recursion.
+              [else
+               (let* ([head    (car node)]
+                      [fn-ptr  (emit-expr `(%scalar (%addr-offset ,head Cons car)) ctx pre)]
+                      [env     (emit-expr `(%scalar (%addr-offset ,head Cons cdr)) ctx pre)]
+                      [c-args  (map (lambda (a) (emit-call-arg a ctx pre #f #f)) args)]
+                      [all-args (cons env c-args)]
+                      [ptypes  (str-join (map (lambda (_) "AnchorVal") all-args) ", ")]
+                      [fn-cast (string-append "((AnchorVal(*)(" ptypes "))_anch_ptr(" fn-ptr "))")])
+                 (string-append fn-cast "(" (str-join all-args ", ") ")"))]))]
+
+         ;; Compound-expression call head — head is not a symbol, must be a closure value.
+         ;; Evaluate it into a tmp, then call via closure convention (cons(fn-ptr, env)).
+         [(pair? h)
+          (let* ([tmp     (ctx-tmp! ctx)]
+                 [tmp-sym (string->symbol tmp)]
+                 [_       (pre-add! pre (string-append "AnchorVal " tmp " = " (emit-expr (car node) ctx pre) ";"))]
+                 [fn-ptr  (emit-expr `(%scalar (%addr-offset ,tmp-sym Cons car)) ctx pre)]
+                 [env     (emit-expr `(%scalar (%addr-offset ,tmp-sym Cons cdr)) ctx pre)]
+                 [c-args  (map (lambda (a) (emit-call-arg a ctx pre #f #f)) args)]
+                 [all-args (cons env c-args)]
+                 [ptypes  (str-join (map (lambda (_) "AnchorVal") all-args) ", ")]
+                 [fn-cast (string-append "((AnchorVal(*)(" ptypes "))_anch_ptr(" fn-ptr "))")])
+            (string-append fn-cast "(" (str-join all-args ", ") ")"))]
 
          [else (anchor-error "cannot emit expression" node)]))]
 
@@ -777,7 +818,7 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
      (let ([arg (cadr node)])
        (cond
          [(hashtable-ref (ctx-structs ctx) (id-sym arg) #f)
-          (string-append "ANCHOR_SIZEOF_" (c-ident arg))]
+          (string-append "ANCHOR_SIZEOF_" (symbol->string (id-sym arg)))]
          [(hashtable-ref (ctx-enums ctx) (id-sym arg) #f)
           "4"]
          [else
@@ -968,6 +1009,28 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
           [(eq? h 'do)
            (for-each (lambda (s) (emit-stmt s ctx)) args)]
 
+          ;; hoist — emit a declaration at file scope (used by lambda/closure)
+          [(eq? h 'hoist)
+           (unless (fx= (length args) 1) (anchor-error "hoist: (hoist form)"))
+           (let ([saved-lines  (ctx-lines ctx)]
+                 [saved-indent (ctx-indent-lv ctx)]
+                 [saved-arena  (ctx-arena-stack ctx)]
+                 [saved-depth  (ctx-arena-depth ctx)]
+                 [saved-fn-ret (ctx-fn-ret ctx)])
+             (ctx-lines-set!       ctx '())
+             (ctx-indent-lv-set!   ctx 0)
+             (ctx-arena-stack-set! ctx '())
+             (ctx-arena-depth-set! ctx 0)
+             (ctx-fn-ret-set!      ctx #f)
+             (emit-stmt (car args) ctx)
+             (ctx-hoisted-set! ctx
+               (append (ctx-hoisted ctx) (reverse (ctx-lines ctx)) (list "")))
+             (ctx-lines-set!       ctx saved-lines)
+             (ctx-indent-lv-set!   ctx saved-indent)
+             (ctx-arena-stack-set! ctx saved-arena)
+             (ctx-arena-depth-set! ctx saved-depth)
+             (ctx-fn-ret-set!      ctx saved-fn-ret))]
+
           ;; block
           [(eq? h 'block)
            (ctx-emit! ctx "{")
@@ -1054,7 +1117,9 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
                                                                (ffi-param-type ptypes i))
                                                 acc))))])
                  (pre-emit! pre ctx)
-                 (ctx-emit! ctx (string-append (c-ident (car node)) "(" (str-join c-args ", ") ");")))
+                 ;; Use bare symbol name (h), not c-ident of node head, so that
+                 ;; macro-introduced extern references emit the correct plain C name.
+                 (ctx-emit! ctx (string-append (symbol->string h) "(" (str-join c-args ", ") ");")))
                (let ([pre (make-pre)])
                  (let ([e (emit-expr node ctx pre)])
                    (pre-emit! pre ctx)
@@ -1170,14 +1235,19 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
               fi)
     (hashtable-set! tbl '_total total)
     (hashtable-set! (ctx-structs ctx) name tbl)
-    (ctx-emit! ctx (string-append "/* struct " (symbol->string name) " */"))
-    (ctx-emit! ctx (string-append "#define ANCHOR_SIZEOF_" cn " " (number->string total)))
-    (for-each (lambda (f)
-                (let ([cf (c-ident (car f))])
-                  (ctx-emit! ctx (string-append "#define ANCHOR_OFFSET_" cn "_" cf " " (number->string (cadr f))))
-                  (ctx-emit! ctx (string-append "#define ANCHOR_SIZE_" cn "_" cf "  " (number->string (caddr f))))))
-              fi)
-    (ctx-emit-blank! ctx)))
+    ;; At top level, emit struct macros to fwd-decls so they precede hoisted functions.
+    ;; Inside a function body (ctx-fn-ret is set), emit inline.
+    (let ([emit! (if (ctx-fn-ret ctx)
+                     (lambda (line) (ctx-emit! ctx line))
+                     (lambda (line) (ctx-fwd-decls-set! ctx (append (ctx-fwd-decls ctx) (list line)))))])
+      (emit! (string-append "/* struct " (symbol->string name) " */"))
+      (emit! (string-append "#define ANCHOR_SIZEOF_" cn " " (number->string total)))
+      (for-each (lambda (f)
+                  (let ([cf (c-ident (car f))])
+                    (emit! (string-append "#define ANCHOR_OFFSET_" cn "_" cf " " (number->string (cadr f))))
+                    (emit! (string-append "#define ANCHOR_SIZE_" cn "_" cf "  " (number->string (caddr f))))))
+                fi)
+      (emit! ""))))
 
 (define (emit-union node ctx)
   ;; (union Name (field sz) ...)
@@ -1236,7 +1306,7 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
       (unless (and (pair? rest) (list? (car rest)))
         (anchor-error "fn: expected param list"))
       (list name
-            (map (lambda (p) (if (sym? p) (id-sym p) '_)) (car rest))
+            (map (lambda (p) (if (sym? p) p '_)) (car rest))
             (cdr rest)))))
 
 (define (emit-fn node ctx arena-sz . rest)
@@ -1244,8 +1314,9 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
   (let* ([global-arena (and (pair? rest) (car rest))]
          [sig    (parse-fn-sig node)]
          [name   (car sig)] [params (cadr sig)] [body (caddr sig)]
-         [ret    (if (eq? (id-sym name) 'main) "int" "AnchorVal")]
          [cn     (c-ident name)]
+         [_      (hashtable-set! (ctx-fns ctx) (id-sym name) cn)]
+         [ret    (if (eq? (id-sym name) 'main) "int" "AnchorVal")]
          [main2? (and (eq? (id-sym name) 'main) (fx= (length params) 2))]
          [c-params
           (if main2? "int _argc_raw, char** _argv_raw"
@@ -1558,6 +1629,8 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
                 (set! parts (append parts (list "") (ctx-fwd-decls ctx))))
               (when (pair? (ctx-globals ctx))
                 (set! parts (append parts (list "") (ctx-globals ctx))))
+              (when (pair? (ctx-hoisted ctx))
+                (set! parts (append parts (list "") (ctx-hoisted ctx))))
               (let ([body-out (ctx-output ctx)])
                 (when (fx> (string-length body-out) 0)
                   (set! parts (append parts (list "" body-out)))))
@@ -1568,7 +1641,8 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
                 (case (id-sym (car e))
                   [(extern-global) (emit-stmt e ctx)           (loop (cdr es) body)]
                   [(ffi)           (emit-ffi  e ctx)           (loop (cdr es) body)]
-                  [(fn-c)          (emit-fn-c e ctx)           (loop (cdr es) body)]
+                  [(fn-c)          (hashtable-set! (ctx-fns ctx) (id-sym (cadr e)) (c-ident (cadr e)))
+                                   (emit-fn-c e ctx)           (loop (cdr es) body)]
                   [(include)       (emit-stmt e ctx)           (loop (cdr es) body)]
                   [(global)        (emit-global e ctx #f)      (loop (cdr es) body)]
                   [(const)         (emit-global e ctx #t)      (loop (cdr es) body)]
@@ -1577,4 +1651,6 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
                   [(unpacked-struct) (emit-struct e ctx #f) (loop (cdr es) body)]
                   [(union)         (emit-union  e ctx)    (loop (cdr es) body)]
                   [(enum)          (emit-enum   e ctx)    (loop (cdr es) body)]
+                  [(fn)            (hashtable-set! (ctx-fns ctx) (id-sym (cadr e)) (c-ident (cadr e)))
+                                   (loop (cdr es) (cons e body))]
                   [else            (loop (cdr es) (cons e body))])))))))

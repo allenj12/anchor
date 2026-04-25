@@ -150,3 +150,42 @@
 (define-syntax null?  (syntax-rules () [(_ v)   (%null-check v)]))
 (define-syntax set-car! (syntax-rules () [(_ lst v) (set! lst Cons car v)]))
 (define-syntax set-cdr! (syntax-rules () [(_ lst v) (set! lst Cons cdr v)]))
+
+;; ---------------------------------------------------------------------------
+;; lambda — anonymous function, optionally with captures
+;;
+;; (lambda (params ...) body ...)              — no captures
+;; (lambda ((caps ...) (params ...)) body ...) — with captures
+;;
+;; Both return a cons cell (fn-ptr . env).
+;; Plain lambda has env = 0 (ignored by callee).
+;; Use call-closure to invoke either form.
+;; ---------------------------------------------------------------------------
+
+;; Pack captures into a linked list: (cons cap1 (cons cap2 ... 0))
+(define-syntax %pack-env
+  (syntax-rules ()
+    [(_) 0]
+    [(_ v vs ...) (cons v (%pack-env vs ...))]))
+
+;; Unpack env list into let-bindings, then evaluate body
+(define-syntax %unpack-env
+  (syntax-rules ()
+    [(_ _e () body ...) (do body ...)]
+    [(_ _e (c cs ...) body ...)
+     (do (let c (car _e))
+         (%unpack-env (cdr _e) (cs ...) body ...))]))
+
+(define-syntax lambda
+  (syntax-rules ()
+    ;; closure form: first arg is ((caps...) (params...))
+    [(_ ((caps ...) (params ...)) body ...)
+     (do (hoist (fn _lam (_lam-env params ...)
+                   (%unpack-env _lam-env (caps ...) body ...)))
+         (let _lam-env (%pack-env caps ...))
+         (cons (fn-ptr _lam) _lam-env))]
+    ;; plain lambda: no captures, env is 0
+    [(_ (params ...) body ...)
+     (do (hoist (fn _lam (_lam-env params ...) body ...))
+         (cons (fn-ptr _lam) 0))]))
+

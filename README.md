@@ -205,6 +205,45 @@ cast it explicitly:
   (printf "Hello, %s\n" (cast char* name)))   ; cast needed — name is AnchorVal
 ```
 
+### Lambda and closures
+
+`lambda` creates an anonymous callable. Call it exactly like a named function — no
+special syntax at the call site.
+
+```anchor
+(global-arena pool (mb 1))
+
+(fn main ()
+  (with-arena pool
+    ; plain lambda — no captures
+    (let sq (lambda (x) (return (* x x))))
+    (sq 5)   ; → 25
+
+    ; closure — first arg is ((captures...) (params...))
+    (let base 10)
+    (let add-base (lambda ((base) (x)) (return (+ x base))))
+    (add-base 7)   ; → 17
+
+    ; pass a lambda to a function
+    (let result (apply sq 6))   ; → 36
+    ))
+```
+
+Captures are packed into a linked-list environment allocated in the **current arena**.
+The callable value itself is also arena-allocated. Both live as long as the arena does —
+don't call a lambda after its arena is reset.
+
+Multiple captures work the same way:
+
+```anchor
+(let a 3) (let b 4)
+(let f (lambda ((a b) (x)) (return (+ x (+ a b)))))
+(f 10)   ; → 17
+```
+
+A zero value is safe to capture — the unpack is driven by the compile-time capture
+list, not a null-termination check at runtime.
+
 ### Function pointers
 
 `fn-ptr` takes the address of any named function (`fn`, `fn-c`, or `ffi`) and boxes
@@ -216,24 +255,30 @@ it as an `AnchorVal`. The primary use is passing a callback pointer to a C funct
 (qsort arr n 8 (fn-ptr compare-ints))
 ```
 
-`call-ptr` calls through a boxed pointer **for `fn` functions only** — it casts to
-the `AnchorVal(AnchorVal, ...)` calling convention that all `fn` functions use:
+`call-ptr` calls through a raw boxed pointer — it casts to the
+`AnchorVal(AnchorVal, ...)` calling convention. Use it for raw function pointer values,
+not for lambdas (which call implicitly):
 
 ```anchor
 (fn add (a b) (return (+ a b)))
 
-(let fp (fn-ptr add))          ; AnchorVal wrapping (void*)add
-(let result (call-ptr fp 3 4)) ; → 7
+(let fp (fn-ptr add))
+(call-ptr fp 3 4)   ; → 7
 ```
 
 For `fn-c` or `ffi` function pointers, use `call-ptr-c` with an explicit signature:
 
 ```anchor
 (let fp (fn-ptr compare-ints))
-(let result (call-ptr-c fp ((const void* const void*) -> int) (ref x) (ref y)))
+(call-ptr-c fp ((const void* const void*) -> int) (ref x) (ref y))
 ```
 
 The signature `((param-types...) -> ret-type)` matches the `ffi` declaration syntax.
+
+**Calling convention:** named `fn` functions are direct C calls. Lambda and closure
+values carry a `(fn-ptr . env)` representation and use a unified calling convention —
+the callee always receives the environment as a hidden first argument. This means you
+cannot call a raw `fn-ptr` value implicitly; use `call-ptr` for that.
 
 ### Memory and arenas
 
@@ -317,6 +362,27 @@ the stack. Use it to deep-copy a data structure out of a scope that is about to 
 
 Nesting `with-parent-arena` climbs one level each time. Global arenas behave the
 same as local ones — the parent of whatever arena is currently active is used.
+
+`arena-reset!` reclaims all allocations in the named arena in O(1) — sets `used` back
+to zero. Pointers into that arena become dangling.
+
+`(arena-remaining)` returns the number of bytes still available in the current arena
+as a signed integer. Useful for debugging or capacity checks:
+
+```anchor
+(let free (arena-remaining))
+(if (< free (mb 1))
+  (printf "arena nearly full\n"))
+```
+
+`(arena-in? ptr)` returns `1` if `ptr` falls within the current arena's buffer, `0`
+otherwise. Useful for asserting that a pointer was allocated from the expected arena:
+
+```anchor
+(let node (alloc (sizeof Node)))
+(if (! (arena-in? node))
+  (printf "unexpected allocation source\n"))
+```
 
 `(ref expr)` takes a stack address; `(deref ptr)` reads through one. Useful for
 passing values by pointer to C functions that write into them.
