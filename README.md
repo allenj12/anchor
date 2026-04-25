@@ -93,14 +93,15 @@ Tail calls are not optimized; use `while` for loops.
 
 ```anchor
 (+ a b)    (- a b)    (* a b)    (/ a b)    (% a b)   ; signed integer
-(+f a b)   (-f a b)   (*f a b)   (/f a b)             ; float (double)
-(+u a b)   (-u a b)   (*u a b)   (/u a b)   (%u a b)  ; unsigned
+(f+ a b)   (f- a b)   (f* a b)   (f/ a b)             ; float (double)
+(u+ a b)   (u- a b)   (u* a b)   (u/ a b)   (u% a b)  ; unsigned
 
 (band x mask)   (bor x y)   (bxor x y)   (bnot x)
 (lshift x n)    (rshift x n)
 
 (== a b)  (!= a b)  (< a b)  (> a b)  (<= a b)  (>= a b)
-(<u a b)  (>u a b)  ; unsigned comparisons
+(f== a b) (f!= a b) (f< a b) (f> a b) (f<= a b) (f>= a b)  ; float
+(u< a b)  (u> a b)  (u<= a b) (u>= a b)                    ; unsigned
 ```
 
 ### Character literals

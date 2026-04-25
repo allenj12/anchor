@@ -296,18 +296,18 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
 (define *arith-ops*
   '((+  . "anchor_add")  (-  . "anchor_sub")  (*  . "anchor_mul")
     (/  . "anchor_div")  (%  . "anchor_mod")
-    (+f . "anchor_addf") (-f . "anchor_subf")  (*f . "anchor_mulf") (/f . "anchor_divf")
-    (+u . "anchor_addu") (-u . "anchor_subu")  (*u . "anchor_mulu")
-    (/u . "anchor_divu") (%u . "anchor_modu")
+    (f+ . "anchor_addf") (f- . "anchor_subf")  (f* . "anchor_mulf") (f/ . "anchor_divf")
+    (u+ . "anchor_addu") (u- . "anchor_subu")  (u* . "anchor_mulu")
+    (u/ . "anchor_divu") (u% . "anchor_modu")
     (band . "anchor_band") (bor . "anchor_bor") (bxor . "anchor_bxor")
     (lshift . "anchor_lshift") (rshift . "anchor_rshift")))
 
 (define *cmp-ops*
   '((==  . "anchor_eq")  (!=  . "anchor_ne")
     (<   . "anchor_lt")  (>   . "anchor_gt")  (<=  . "anchor_le")  (>=  . "anchor_ge")
-    (==f . "anchor_eqf") (!=f . "anchor_nef")
-    (<f  . "anchor_ltf") (>f  . "anchor_gtf") (<=f . "anchor_lef") (>=f . "anchor_gef")
-    (<u  . "anchor_ltu") (>u  . "anchor_gtu") (<=u . "anchor_leu") (>=u . "anchor_geu")))
+    (f== . "anchor_eqf") (f!= . "anchor_nef")
+    (f<  . "anchor_ltf") (f>  . "anchor_gtf") (f<= . "anchor_lef") (f>= . "anchor_gef")
+    (u<  . "anchor_ltu") (u>  . "anchor_gtu") (u<= . "anchor_leu") (u>= . "anchor_geu")))
 
 (define *logic-ops*
   `((&& . "anchor_and")
