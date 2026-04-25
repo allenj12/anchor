@@ -35,15 +35,68 @@ Run a file:
 ## Hello World
 
 ```anchor
+(include <stdio.h>)
 (ffi printf (const char* ...) -> int)
+
+(fn main ()
+  (printf "Hello, Anchor!\n"))
+```
+
+## A more involved example
+
+```anchor
+(include <stdio.h>)
+(ffi printf (const char* ...) -> int)
+
+; each: hygienic list iterator — _cur in the template never clashes with call-site vars
+(define-syntax each
+  (syntax-rules ()
+    [(_ var lst body ...)
+     (do (let _cur lst)
+         (while (! (null? _cur))
+           (let var (car _cur))
+           body ...
+           (set! _cur (cdr _cur))))]))
+
+; unroll: macro-case duplicates body N times at expand time — no loop in generated C
+(define-syntax unroll
+  (macro-case ()
+    [(_ n body ...)
+     `(do ,@(apply append (map (lambda (_) body) (iota n))))]))
+
+(fn fold (lst f init)
+  (let acc init)
+  (each x lst (set! acc (f x acc)))
+  (return acc))
 
 (with-arena
   (fn main ()
-    (printf "Hello, Anchor!\n")))
+    (let nums (cons 2 (cons 3 (cons 4 (cons 5 nil)))))
+
+    ; closure captures base from the enclosing scope
+    (let base 10)
+    (let add-base (lambda ((base) (x)) (return (+ x base))))
+
+    ; _cur here is a different variable from the one inside each —
+    ; hygiene ensures they never collide
+    (let _cur 99)
+    (each n nums
+      (printf "%d " (cast int (add-base n))))
+    (printf "\n")
+
+    (let sum (fold nums (lambda (x acc) (return (+ x acc))) 0))
+    (printf "sum: %d\n" (cast int sum))
+
+    ; unroll inlines 4 increments — no branch, no loop counter in the generated C
+    (let ticks 0)
+    (unroll 4 (set! ticks (+ ticks 1)))
+    (printf "ticks: %d\n" (cast int ticks))
+
+    (printf "_cur: %d\n" (cast int _cur))))
 ```
 
 `with-arena` attaches a heap arena to the function. All `alloc` calls inside use it;
-everything is freed on return. The default size is 64 MB.
+everything is freed on return. The default size is 1 MB.
 
 ---
 
@@ -80,10 +133,12 @@ as in C — they apply to the innermost enclosing `while`.
 
 ```anchor
 (fn square (n)
-  (* n n))
+  (return (* n n)))
 
 (fn abs-val (n)
-  (if (< n 0) (* n -1) n))
+  (if (< n 0)
+    (return (* n -1))
+    (return n)))
 ```
 
 All functions return `AnchorVal`. `main` is the exception — it returns `int`.
@@ -225,8 +280,7 @@ special syntax at the call site.
     (let add-base (lambda ((base) (x)) (return (+ x base))))
     (add-base 7)   ; → 17
 
-    ; pass a lambda to a function
-    (let result (apply sq 6))   ; → 36
+    (sq 6)   ; → 36
     ))
 ```
 
@@ -241,9 +295,6 @@ Multiple captures work the same way:
 (let f (lambda ((a b) (x)) (return (+ x (+ a b)))))
 (f 10)   ; → 17
 ```
-
-A zero value is safe to capture — the unpack is driven by the compile-time capture
-list, not a null-termination check at runtime.
 
 ### Function pointers
 
@@ -285,7 +336,7 @@ cannot call a raw `fn-ptr` value implicitly; use `call-ptr` for that.
 
 `alloc` bumps the current arena pointer — O(1), no `malloc` overhead.
 
-`kb`, `mb`, and `gb` are built-in size macros that expand at compile time — they produce no C output:
+`kb`, `mb`, and `gb` are built-in size macros that expand at compile time.
 
 ```anchor
 (with-arena (mb 4) ...)
@@ -314,9 +365,6 @@ To attach a global arena to a function so all its allocations go there, wrap the
 (with-arena scratch
   (fn build-list (n) ...))     ; all allocs inside go into scratch
 ```
-
-This is equivalent to `(with-arena scratch ...)` inside the function body but
-signals intent at the definition site. Multiple functions can be wrapped together.
 
 ```anchor
 (global-arena scratch (kb 64))   ; 64 KiB, allocated once
@@ -492,14 +540,16 @@ Pointer-to-array in a struct field — follow with `->` then navigate by byte of
 All fields share offset 0. Total size is the largest field.
 
 ```anchor
-(union Num
-  (as-int   8)
-  (as-float 8))
+(union Val
+  (as-byte  1)
+  (as-int   4)
+  (as-ptr   8))   ; total size = 8 (largest field)
 
-(let u (alloc (sizeof Num)))
-(set! u Num as-int 42)
-(get u Num as-int)    ; 42
-(get u Num as-float)  ; reinterpret same bits as double
+(let u (alloc (sizeof Val)))
+(set! u Val as-ptr 0x0102030405060708)
+(get u Val as-ptr)   ; 0x0102030405060708
+(get u Val as-int)   ; 0x05060708  — lower 32 bits
+(get u Val as-byte)  ; 0x08        — lowest byte
 ```
 
 ### Enums
@@ -536,9 +586,8 @@ Auto-incrementing (omit the value):
 `cons`, `car`, `cdr`, `set-car!`, `set-cdr!`, `nil`, and `null?` are built into the language.
 `cons` allocates a two-slot cell from the current arena.
 
-`nil` is the zero value — a null pointer. Pass it to any `ffi` function expecting a
-pointer; `null?` tests for it. `nil` is distinct from integer `0`: a null check tests
-the pointer, not the integer value.
+`nil` is the zero value — a null pointer. It is identical to integer `0` at the bit
+level; `null?` simply tests whether the value is zero.
 
 ```anchor
 (let lst (cons 1 (cons 2 (cons 3 nil))))

@@ -517,7 +517,7 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
          [(eq? h 'deref)
           (unless (fx= (length args) 1) (anchor-error "deref: (deref expr)"))
           (let ([arg (car args)])
-            (if (and (pair? arg) (eq? (car arg) '%addr-offset))
+            (if (and (pair? arg) (eq? (id-sym (car arg)) '%addr-offset))
               (let* ([ao    (cdr arg)]
                      [ptr-e (emit-expr (car ao) ctx pre)]
                      [sn    (id-sym (cadr ao))]
@@ -560,7 +560,7 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
           (unless (fx= (length args) 1) (anchor-error "%scalar: (%scalar addr)"))
           (let ([arg (car args)])
             (cond
-              [(and (pair? arg) (eq? (car arg) '%addr-offset))
+              [(and (pair? arg) (eq? (id-sym (car arg)) '%addr-offset))
                (let* ([ao    (cdr arg)]
                       [inner (car ao)]
                       [sn    (id-sym (cadr ao))]
@@ -570,7 +570,7 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
                       [_     (or (hashtable-ref (ctx-structs ctx) sn #f)
                                  (anchor-error "%scalar/%addr-offset: unknown struct" sn))]
                       [tmp   (ctx-tmp! ctx)])
-                 (if (and (pair? inner) (eq? (car inner) '%ptr+))
+                 (if (and (pair? inner) (eq? (id-sym (car inner)) '%ptr+))
                    ;; two-level fast path: (%scalar (%addr-offset (%ptr+ base off) S f))
                    ;; emit _ANCH_HPTR(base) + _ANCH_IVAL(off) + FIELD — base is loop-hoistable
                    (let* ([base-e (emit-expr (cadr inner) ctx pre)]
@@ -583,7 +583,7 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
                      (pre-add! pre (string-append "AnchorVal " tmp " = 0;"))
                      (pre-add! pre (string-append "__builtin_memcpy(&" tmp ", (char*)_ANCH_HPTR(" ptr-e ") + ANCHOR_OFFSET_" csn "_" cfn ", ANCHOR_SIZE_" csn "_" cfn ");"))
                      tmp)))]
-              [(and (pair? arg) (eq? (car arg) '%ptr+))
+              [(and (pair? arg) (eq? (id-sym (car arg)) '%ptr+))
                (let* ([ro    (cdr arg)]
                       [ptr-e (emit-expr (car ro) ctx pre)]
                       [off-e (emit-expr (cadr ro) ctx pre)]
@@ -604,7 +604,7 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
           (unless (fx= (length args) 2) (anchor-error "%store: (%store addr val)"))
           (let ([addr-arg (car args)] [val-arg (cadr args)])
             (cond
-              [(and (pair? addr-arg) (eq? (car addr-arg) '%addr-offset))
+              [(and (pair? addr-arg) (eq? (id-sym (car addr-arg)) '%addr-offset))
                (let* ([ao    (cdr addr-arg)]
                       [ptr-e (emit-expr (car ao) ctx pre)]
                       [sn    (id-sym (cadr ao))]
@@ -618,7 +618,7 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
                  (pre-add! pre (string-append "{ AnchorVal " tmp " = " v ";"))
                  (pre-add! pre (string-append "  __builtin_memcpy((char*)_ANCH_HPTR(" ptr-e ") + ANCHOR_OFFSET_" csn "_" cfn ", &" tmp ", sizeof(AnchorVal)); }"))
                  "ANCHOR_NIL")]
-              [(and (pair? addr-arg) (eq? (car addr-arg) '%ptr+))
+              [(and (pair? addr-arg) (eq? (id-sym (car addr-arg)) '%ptr+))
                (let* ([ro    (cdr addr-arg)]
                       [ptr-e (emit-expr (car ro) ctx pre)]
                       [off-e (emit-expr (cadr ro) ctx pre)]
@@ -650,7 +650,7 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
           (unless (fx= (length args) 2) (anchor-error "%scalar-store: (%scalar-store addr val)"))
           (let ([addr-arg (car args)] [val-arg (cadr args)])
             (cond
-              [(and (pair? addr-arg) (eq? (car addr-arg) '%addr-offset))
+              [(and (pair? addr-arg) (eq? (id-sym (car addr-arg)) '%addr-offset))
                (let* ([ao    (cdr addr-arg)]
                       [inner (car ao)]
                       [sn    (id-sym (cadr ao))]
@@ -661,7 +661,7 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
                                  (anchor-error "%scalar-store/%addr-offset: unknown struct" sn))]
                       [v     (emit-expr val-arg ctx pre)]
                       [tmp   (ctx-tmp! ctx)])
-                 (if (and (pair? inner) (eq? (car inner) '%ptr+))
+                 (if (and (pair? inner) (eq? (id-sym (car inner)) '%ptr+))
                    ;; two-level fast path
                    (let* ([base-e (emit-expr (cadr inner) ctx pre)]
                           [off-e  (emit-expr (caddr inner) ctx pre)])
@@ -673,7 +673,7 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
                      (pre-add! pre (string-append "{ AnchorVal " tmp " = " v ";"))
                      (pre-add! pre (string-append "  __builtin_memcpy((char*)_ANCH_HPTR(" ptr-e ") + ANCHOR_OFFSET_" csn "_" cfn ", &" tmp ", ANCHOR_SIZE_" csn "_" cfn "); }"))
                      "ANCHOR_NIL")))]
-              [(and (pair? addr-arg) (eq? (car addr-arg) '%ptr+))
+              [(and (pair? addr-arg) (eq? (id-sym (car addr-arg)) '%ptr+))
                (let* ([ro    (cdr addr-arg)]
                       [ptr-e (emit-expr (car ro) ctx pre)]
                       [off-e (emit-expr (cadr ro) ctx pre)]
