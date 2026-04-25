@@ -1369,6 +1369,10 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
           (if main2? "int _argc_raw, char** _argv_raw"
               (if (null? params) "void"
                   (str-join (map (lambda (p) (string-append "AnchorVal " (c-ident p))) params) ", ")))])
+    ;; Forward declaration so hoisted lambdas can call this fn before its definition
+    (unless (string=? cn "main")
+      (ctx-fwd-decls-set! ctx (append (ctx-fwd-decls ctx)
+                                      (list (string-append ret " " cn "(" c-params ");")))))
     (ctx-emit-blank! ctx)
     (ctx-emit! ctx (string-append ret " " cn "(" c-params ") {"))
     (ctx-indent! ctx)
