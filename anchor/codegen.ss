@@ -1151,6 +1151,38 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
           [(eq? h 'with-parent-arena)
            (emit-with-parent-arena node ctx)]
 
+          ;; call-ptr-c as statement — avoid synthesizing anchor_int(0) for void returns
+          [(eq? h 'call-ptr-c)
+           (when (fx< (length args) 2)
+             (anchor-error "call-ptr-c: (call-ptr-c fp ((param-type ...) -> ret-type) arg ...)"))
+           (let* ([sig     (cadr args)]
+                  [ret-str (if (and (fx>= (length sig) 3) (eq? (id-sym (cadr sig)) '->))
+                               (cast-type-str (caddr sig))
+                               (anchor-error "call-ptr-c: sig must be ((types...) -> ret)"))])
+             (if (string=? ret-str "void")
+                 ;; Void return: emit the call directly as a statement, no anchor_int(0)
+                 (let* ([pre       (make-pre)]
+                        [fp-expr   (car args)]
+                        [call-args (cddr args)]
+                        [params    (car sig)]
+                        [fp        (emit-expr fp-expr ctx pre)]
+                        [ptypes    (parse-ffi-params params)]
+                        [ptypes-s  (if (null? ptypes) "void" (str-join ptypes ", "))]
+                        [fn-cast   (string-append "((" ret-str "(*)(" ptypes-s "))_anch_ptr(" fp "))")]
+                        [c-args    (let loop ([as call-args] [i 0] [acc '()])
+                                     (if (null? as) (reverse acc)
+                                         (loop (cdr as) (fx+ i 1)
+                                               (cons (emit-call-arg (car as) ctx pre #t
+                                                                    (ffi-param-type ptypes i))
+                                                     acc))))])
+                   (pre-emit! pre ctx)
+                   (ctx-emit! ctx (string-append fn-cast "(" (str-join c-args ", ") ");")))
+                 ;; Non-void: fall through to expression statement path
+                 (let ([pre (make-pre)])
+                   (let ([e (emit-expr node ctx pre)])
+                     (pre-emit! pre ctx)
+                     (ctx-emit! ctx (string-append e ";"))))))]
+
           ;; bare extern call or expression statement
           [else
            (if (and (sym? h) (hashtable-ref (ctx-externs ctx) (id-sym h) #f))
