@@ -706,7 +706,9 @@
     (let ([r (assq sym env)]) (if r (cdr r) sym))))
 
 ;; Walk form stripping stx and applying rename env.
-(define (resolve form env)
+;; globals: eq-hashtable of bare symbols declared with (global ...) or (const ...).
+;; Macro-introduced references to globals strip marks to the bare symbol.
+(define (resolve form env globals)
   (cond
     [(stx? form)
      (let ([sym (stx-sym form)] [marks (stx-marks form)] [src (stx-src form)])
@@ -716,11 +718,13 @@
            (let ([r (assq sym env)])
              (if r (cdr r)
                  (if src (make-stx sym '() src) sym)))
-           ;; Macro-introduced (non-empty marks): look up by (sym . marks)
-           ;; If not in env, preserve the stx so c-ident can encode marks in the C name.
-           ;; Two references with the same marks always produce the same C identifier,
-           ;; even across sibling top-level forms that are each resolved with empty env.
-           (let ([r (assoc (cons sym marks) env)]) (if r (cdr r) form))))]
+           ;; Macro-introduced (non-empty marks): look up by (sym . marks).
+           ;; If in env → local macro binding.
+           ;; Else if bare symbol is a known global → strip marks to bare symbol.
+           ;; Else preserve stx so c-ident can encode marks in the C name.
+           (let ([r (assoc (cons sym marks) env)])
+             (if r (cdr r)
+                 (if (hashtable-ref globals sym #f) sym form)))))]
     [(symbol? form) (let ([r (assq form env)]) (if r (cdr r) form))]
     [(not (pair? form)) form]
     [(null? form) form]
@@ -736,9 +740,8 @@
                  ;; Resolve fn name: macro-introduced names preserve their marks so
                  ;; c-ident encodes them as _anc_N — no gensym needed.
                  ;; User-visible names (datum->syntax or plain) resolve normally.
-                 [nm-res  (resolve nm env)]
+                 [nm-res  (resolve nm env globals)]
                  [stx     (delete-duplicates (collect-stx-names (cddr form)))]
-                 ;; Only rename user-provided params that conflict with macro global refs
                  [p-env   (filter-map
                             (lambda (p)
                               (and (id-user? p)
@@ -748,21 +751,18 @@
                  [env2    (append p-env env)]
                  [ps2     (map (lambda (p)
                                  (let ([r (assq (id-sym p) p-env)])
-                                   ;; Renamed user param → gensym. Macro-introduced → keep stx
-                                   ;; (marks encode uniqueness). Plain user param → bare sym.
                                    (if r (cdr r) (if (id-user? p) (id-sym p) p))))
                                params)])
-            (cons 'fn (cons nm-res (cons ps2 (resolve-seq body stx env2)))))]
-         ;; fn-c — same param-rename logic as fn; params are (type... name) sub-lists
+            (cons 'fn (cons nm-res (cons ps2 (resolve-seq body stx env2 globals)))))]
+         ;; fn-c — same param-rename logic as fn
          [(eq? hs 'fn-c)
           (let* ([nm     (cadr form)]
                  [params (if (pair? (cddr form)) (caddr form) '())]
                  [rest   (if (pair? (cddr form)) (cdddr form) '())]
                  [body   (if (and (pair? rest) (eq? (id-sym (car rest)) '->))
                              (cddr rest) rest)]
-                 [nm-res (resolve nm env)]
+                 [nm-res (resolve nm env globals)]
                  [stx    (delete-duplicates (collect-stx-names body))]
-                 ;; Last element of each param sub-list is the binding name
                  [p-env  (filter-map
                            (lambda (p)
                              (and (pair? p)
@@ -781,28 +781,25 @@
                                               (list (if r (cdr r) (id-sym pname)))))
                                     (list (id-sym p))))
                               params)])
-            (cons 'fn-c (cons nm-res (cons ps2 (map (lambda (x) (resolve x env2)) rest)))))]
+            (cons 'fn-c (cons nm-res (cons ps2 (map (lambda (x) (resolve x env2 globals)) rest)))))]
          ;; block / do — sequential bodies with let threading
          [(memv hs '(block do))
           (let* ([stx (delete-duplicates (collect-stx-names form))])
-            (cons hs (resolve-seq (cdr form) stx env)))]
+            (cons hs (resolve-seq (cdr form) stx env globals)))]
          [(eq? hs 'while)
           (let ([stx (delete-duplicates (collect-stx-names form))])
-            (cons 'while (cons (resolve (cadr form) env)
-                               (resolve-seq (cddr form) stx env))))]
+            (cons 'while (cons (resolve (cadr form) env globals)
+                               (resolve-seq (cddr form) stx env globals))))]
          ;; let — resolve name (preserve stx marks for macro-introduced), resolve value
-         ;; Sequential renaming is done by resolve-seq when walking a body.
          [(eq? hs 'let)
-          (list 'let (resolve (cadr form) env) (resolve (caddr form) env))]
+          (list 'let (resolve (cadr form) env globals) (resolve (caddr form) env globals))]
          ;; default — resolve head and all children
          [else
-          (cons (resolve (car form) env)
-                (map (lambda (c) (resolve c env)) (cdr form)))]))]))
+          (cons (resolve (car form) env globals)
+                (map (lambda (c) (resolve c env globals)) (cdr form)))]))]))
 
 ;; Walk a sequential statement list, threading let-binding renames.
-;; Only renames USER-PROVIDED bindings (plain or empty-marks stx) that
-;; conflict with macro-introduced global references (stx-names).
-(define (resolve-seq stmts stx-names env)
+(define (resolve-seq stmts stx-names env globals)
   (if (null? stmts) '()
       (let* ([stmt (car stmts)]
              [hs   (and (pair? stmt) (id-sym (car stmt)))])
@@ -812,19 +809,16 @@
                    [val     (caddr stmt)]
                    [marks   (if (stx? binding) (stx-marks binding) '())]
                    [macro?  (not (id-user? binding))]
-                   ;; Macro-introduced binding: keep stx as-is — marks already encode
-                   ;; uniqueness via c-ident (no gensym needed, no env entry needed).
-                   ;; User binding conflicting with macro global: gensym, key by bare sym.
                    [new-sym (cond
                               [macro?              binding]
                               [(memv sym stx-names) (anchor-gensym sym)]
                               [else sym])]
                    [env2    (if (or macro? (eq? new-sym sym)) env
                                 (cons (cons sym new-sym) env))])
-              (cons (list 'let new-sym (resolve val env))
-                    (resolve-seq (cdr stmts) stx-names env2)))
-            (cons (resolve stmt env)
-                  (resolve-seq (cdr stmts) stx-names env))))))
+              (cons (list 'let new-sym (resolve val env globals))
+                    (resolve-seq (cdr stmts) stx-names env2 globals)))
+            (cons (resolve stmt env globals)
+                  (resolve-seq (cdr stmts) stx-names env globals))))))
 
 (define (expand-all exprs)
   ;; Process left-to-right so define-syntax forms register before use.
@@ -837,7 +831,15 @@
   (let ([expand (make-expander)])
     (let loop ([rest exprs] [acc '()])
       (if (null? rest)
-          (map (lambda (f) (resolve f '())) (reverse acc))
+          ;; Collect known globals/consts so resolve can strip marks for them
+          (let ([globals (make-eq-hashtable)])
+            (for-each (lambda (f)
+                        (when (and (pair? f) (pair? (cdr f)))
+                          (let ([h (id-sym (car f))])
+                            (when (memq h '(global const global-arena))
+                              (hashtable-set! globals (id-sym (cadr f)) #t)))))
+                      acc)
+            (map (lambda (f) (resolve f '() globals)) (reverse acc)))
           (let ([v (expand (car rest))])
             (cond
               [(not v)
