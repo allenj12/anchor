@@ -108,16 +108,6 @@
                  (set! col (fx+ col (fx- j i)))
                  (loop j))]
 
-              ;; Char literal: \x... or \<single>
-              [(and (char=? c #\\)
-                    (fx< (fx+ i 1) len)
-                    (not (char-whitespace? (string-ref src (fx+ i 1))))
-                    (not (memv (string-ref src (fx+ i 1)) '(#\( #\) #\[ #\] #\" #\; #\` #\' #\,))))
-               (let-values ([(tok j) (read-char-literal src i len)])
-                 (push! tok tl tc)
-                 (set! col (fx+ col (fx- j i)))
-                 (loop j))]
-
               ;; Atom (symbol or number)
               [else
                (let-values ([(tok j) (read-atom src i len)])
@@ -155,16 +145,6 @@
                 (loop (fx+ i 1) (cons (string-ref src i) chars))))
           (values (string-append "#\\" (string c)) (fx+ ci 1))))))
 
-(define (read-char-literal src start len)
-  (let ([next (string-ref src (fx+ start 1))])
-    (if (and (char=? next #\x)
-             (fx< (fx+ start 2) len)
-             (hex-digit? (string-ref src (fx+ start 2))))
-        (let loop ([i (fx+ start 2)] [chars '(#\x #\\)])
-          (if (and (fx< i len) (hex-digit? (string-ref src i)))
-              (loop (fx+ i 1) (cons (string-ref src i) chars))
-              (values (list->string (reverse chars)) i)))
-        (values (string #\\ next) (fx+ start 2)))))
 
 (define (read-atom src start len)
   (let loop ([i start] [chars '()])
@@ -239,9 +219,6 @@
       ;; String literal
       [(and (string? tok) (fx> (string-length tok) 0) (char=? (string-ref tok 0) #\"))
        (parse-string-token tok)]
-      ;; Char literal
-      [(and (string? tok) (fx> (string-length tok) 0) (char=? (string-ref tok 0) #\\))
-       (parse-char-token tok)]
       ;; Number or symbol
       [else
        (parse-atom tok filename tl tc)])))
@@ -281,20 +258,6 @@
                     [else (write-char c out) (loop (fx+ i 1))]))
                 (begin (write-char c out) (loop (fx+ i 1)))))))))
 
-(define (parse-char-token tok)
-  (if (and (fx>= (string-length tok) 2) (char=? (string-ref tok 1) #\x))
-      (let ([n (string->number (substring tok 2 (string-length tok)) 16)])
-        (or n (anchor-error "bad hex char literal" tok)))
-      (let ([c (string-ref tok 1)])
-        (cond
-          [(char=? c #\n) 10]
-          [(char=? c #\t)  9]
-          [(char=? c #\r) 13]
-          [(char=? c #\0)  0]
-          [(char=? c #\e) 27]
-          [(char=? c #\a)  7]
-          [(char=? c #\b)  8]
-          [else (char->integer c)]))))
 
 (define (parse-atom tok filename line col)
   (cond
