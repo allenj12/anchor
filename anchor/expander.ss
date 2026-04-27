@@ -25,8 +25,8 @@
     embed-bytes embed-string
     cons car cdr set-car! set-cdr! nil null?
     unpacked-struct union enum
-    + - * / % +f -f *f /f +u -u *u /u %u
-    == != < > <= >= ==f !=f <f >f <=f >=f <u >u <=u >=u
+    + - * / % f+ f- f* f/ u+ u- u* u/ u%
+    == != < > <= >= f== f!= f< f> f<= f>= u< u> u<= u>=
     && || !
     band bor bxor bnot lshift rshift))
 
