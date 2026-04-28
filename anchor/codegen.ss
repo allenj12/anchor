@@ -47,6 +47,7 @@ typedef struct _AnchorArena {
     char*                buf;
     size_t               cap;
     size_t               used;
+    size_t               checkpoint;
     struct _AnchorArena* prev;
 } _AnchorArena;
 
@@ -1108,11 +1109,16 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
 
           ;; arena-reset!
           [(eq? h 'arena-reset!)
-           (unless (and (fx= (length args) 1) (sym? (car args)))
-             (anchor-error "arena-reset!: (arena-reset! name)"))
-           (let ([cname (hashtable-ref (ctx-global-arenas ctx) (id-sym (car args)) #f)])
-             (unless cname (anchor-error "arena-reset!: not a declared global-arena" (car args)))
-             (ctx-emit! ctx (string-append "_anchor_arena_reset(&" cname ");")))]
+           (cond
+             ;; (arena-reset!) — no args: reset to checkpoint floor (or 0 if none)
+             [(null? args)
+              (ctx-emit! ctx "_anchor_arena_top->used = _anchor_arena_top->checkpoint;")]
+             ;; (arena-reset! name) — reset a named global arena
+             [(and (fx= (length args) 1) (sym? (car args)))
+              (let ([cname (hashtable-ref (ctx-global-arenas ctx) (id-sym (car args)) #f)])
+                (unless cname (anchor-error "arena-reset!: not a declared global-arena" (car args)))
+                (ctx-emit! ctx (string-append "_anchor_arena_reset(&" cname ");")))]
+             [else (anchor-error "arena-reset!: (arena-reset!) or (arena-reset! name)")])]
 
           ;; extern-global
           [(eq? h 'extern-global)
@@ -1162,6 +1168,8 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
            (emit-with-arena node ctx)]
           [(eq? h 'with-parent-arena)
            (emit-with-parent-arena node ctx)]
+          [(eq? h 'with-arena-checkpoint)
+           (emit-with-arena-checkpoint node ctx)]
 
           ;; call-ptr-c as statement — avoid synthesizing anchor_int(0) for void returns
           [(eq? h 'call-ptr-c)
@@ -1446,7 +1454,7 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
              (if use-heap
                  (ctx-emit! ctx (string-append "char* " av "_buf = (char*)__builtin_malloc(" cap ");"))
                  (ctx-emit! ctx (string-append "char " av "_buf[" cap "];")))
-             (ctx-emit! ctx (string-append "_AnchorArena " av " = {" av "_buf, " cap ", 0, _anchor_arena_top};"))
+             (ctx-emit! ctx (string-append "_AnchorArena " av " = {" av "_buf, " cap ", 0, 0, _anchor_arena_top};"))
              (ctx-emit! ctx (string-append "_anchor_arena_top = &" av ";"))
              (ctx-push-arena! ctx av #f)
              (ctx-arena-depth-set! ctx (fx+ (ctx-arena-depth ctx) 1))
@@ -1519,7 +1527,7 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
                (if use-heap
                    (ctx-emit! ctx (string-append "char* " av "_buf = (char*)__builtin_malloc(" cap ");"))
                    (ctx-emit! ctx (string-append "char " av "_buf[" cap "];")))
-               (ctx-emit! ctx (string-append "_AnchorArena " av " = {" av "_buf, " cap ", 0, _anchor_arena_top};"))
+               (ctx-emit! ctx (string-append "_AnchorArena " av " = {" av "_buf, " cap ", 0, 0, _anchor_arena_top};"))
                (ctx-emit! ctx (string-append "_anchor_arena_top = &" av ";"))
                (ctx-push-arena! ctx av #f)
                (ctx-arena-depth-set! ctx (fx+ (ctx-arena-depth ctx) 1))
@@ -1550,6 +1558,25 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
       (ctx-dedent! ctx)
       (ctx-emit! ctx "}"))))
 
+(define (emit-with-arena-checkpoint node ctx)
+  ;; (with-arena-checkpoint body...) — save arena used, run body, restore used.
+  ;; All allocations inside the checkpoint are reclaimed at scope exit.
+  (let ([body (cdr node)])
+    (when (null? body) (anchor-error "with-arena-checkpoint: empty body"))
+    (let ([sv (string-append "_anc_cp_" (ctx-tmp! ctx))])
+      (ctx-emit! ctx "{")
+      (ctx-indent! ctx)
+      ;; Save both used and the previous checkpoint value
+      (ctx-emit! ctx (string-append "size_t " sv "_used = _anchor_arena_top->used;"))
+      (ctx-emit! ctx (string-append "size_t " sv "_prev = _anchor_arena_top->checkpoint;"))
+      (ctx-emit! ctx (string-append "_anchor_arena_top->checkpoint = _anchor_arena_top->used;"))
+      (for-each (lambda (s) (emit-stmt s ctx)) body)
+      ;; Restore used and previous checkpoint
+      (ctx-emit! ctx (string-append "_anchor_arena_top->used = " sv "_used;"))
+      (ctx-emit! ctx (string-append "_anchor_arena_top->checkpoint = " sv "_prev;"))
+      (ctx-dedent! ctx)
+      (ctx-emit! ctx "}"))))
+
 (define (emit-global-arena node ctx)
   ;; (global-arena name size) — static buffer, linked into arena stack at runtime
   (let* ([items  (cdr node)]
@@ -1563,7 +1590,7 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
       (append (ctx-globals ctx)
               (list (string-append "static char " cname "_buf[" cap "];")
                     (string-append "static _AnchorArena " cname
-                                   " = {" cname "_buf, " cap ", 0, NULL};"))))))
+                                   " = {" cname "_buf, " cap ", 0, 0, NULL};"))))))
 
 (define (emit-global node ctx const?)
   (let* ([name  (cadr node)]
@@ -1686,7 +1713,7 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
            (if use-heap
                (ctx-emit! ctx (string-append "char* " av "_buf = (char*)__builtin_malloc(" cap ");"))
                (ctx-emit! ctx (string-append "char " av "_buf[" cap "];")))
-           (ctx-emit! ctx (string-append "_AnchorArena " av " = {" av "_buf, " cap ", 0, _anchor_arena_top};"))
+           (ctx-emit! ctx (string-append "_AnchorArena " av " = {" av "_buf, " cap ", 0, 0, _anchor_arena_top};"))
            (ctx-emit! ctx (string-append "_anchor_arena_top = &" av ";"))
            (ctx-push-arena! ctx av #f)
            (ctx-arena-depth-set! ctx (fx+ (ctx-arena-depth ctx) 1)))])

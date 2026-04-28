@@ -417,8 +417,60 @@ the stack. Use it to deep-copy a data structure out of a scope that is about to 
 Nesting `with-parent-arena` climbs one level each time. Global arenas behave the
 same as local ones — the parent of whatever arena is currently active is used.
 
-`arena-reset!` reclaims all allocations in the named arena in O(1) — sets `used` back
-to zero. Pointers into that arena become dangling.
+`arena-reset!` reclaims arena allocations in O(1). With a name it resets that global
+arena to zero; with no arguments it resets the current arena to its **checkpoint floor**
+(or zero if no checkpoint is active):
+
+```anchor
+(arena-reset! scratch)   ; reset named global arena to zero
+(arena-reset!)           ; reset current arena to checkpoint floor (or 0)
+```
+
+`with-arena-checkpoint` saves the current allocation point and restores it on scope
+exit — everything allocated inside the checkpoint is reclaimed automatically. Use it
+for scratch work in a loop without resetting the entire arena:
+
+```anchor
+(global-arena pool (mb 10))
+
+(with-arena pool
+  (let permanent (alloc 1024))   ; lives beyond checkpoints
+
+  (while (< i n)
+    (with-arena-checkpoint
+      ;; all scratch allocations here are reclaimed at end of each iteration
+      (let tmp (alloc (* size 8)))
+      (process tmp))
+    (set! i (+ i 1)))
+
+  ;; permanent is still valid here
+  (use permanent))
+```
+
+`arena-reset!` inside a checkpoint resets to the checkpoint's start, not to zero —
+preserving allocations made before the checkpoint:
+
+```anchor
+(with-arena-checkpoint
+  (let a (alloc 64))
+  (let b (alloc 128))
+  (arena-reset!)          ; reclaims a and b, resets to checkpoint start
+  (let c (alloc 64)))     ; reuses the same memory
+```
+
+Checkpoints nest — each level saves and restores independently. `arena-reset!` always
+targets the innermost checkpoint. The checkpoint value is stored in the arena struct
+at runtime, so it works correctly across function boundaries:
+
+```anchor
+(fn do-scratch ()
+  (let tmp (alloc 512))
+  (arena-reset!)            ; resets to caller's checkpoint floor, not zero
+  )
+
+(with-arena-checkpoint
+  (do-scratch))             ; checkpoint protects pre-existing allocations
+```
 
 `(arena-remaining)` returns the number of bytes still available in the current arena
 as a signed integer. Useful for debugging or capacity checks:
@@ -922,7 +974,10 @@ write barriers.
 **Arenas, not GC.** `alloc` bumps a pointer. Anonymous `with-arena` scopes free all
 allocations when the block exits. `global-arena` declares a named arena with permanent
 backing memory — reset it explicitly with `arena-reset!` when you want to reclaim.
-Arenas nest and stack; `cons` and `alloc` always use the innermost active arena.
+`with-arena-checkpoint` marks a restore point for scratch work within a loop or
+function call — everything allocated inside is reclaimed at scope exit, while earlier
+allocations survive. Arenas nest and stack; `cons` and `alloc` always use the innermost
+active arena.
 
 **C as the backend.** The compiler emits a single `.c` file with no dependencies
 beyond `anchor.h` (included from `anchor/runtime/`). You can inspect, modify, or
