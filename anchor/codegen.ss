@@ -1748,6 +1748,17 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
                   [(unpacked-struct) (emit-struct e ctx #f) (loop (cdr es) body)]
                   [(union)         (emit-union  e ctx)    (loop (cdr es) body)]
                   [(enum)          (emit-enum   e ctx)    (loop (cdr es) body)]
+                  [(register-sizeof)
+                   (let* ([name (id-sym (cadr e))]
+                          [sz   (caddr e)]
+                          [tbl  (make-eq-hashtable)]
+                          [cname (symbol->string name)])
+                     (hashtable-set! tbl '_total sz)
+                     (hashtable-set! (ctx-structs ctx) name tbl)
+                     (ctx-globals-set! ctx
+                       (append (ctx-globals ctx)
+                               (list (string-append "#define ANCHOR_SIZEOF_" cname " " (number->string sz))))))
+                   (loop (cdr es) body)]
                   [(fn)            (hashtable-set! (ctx-fns ctx) (id-sym (cadr e)) (c-ident (cadr e)))
                                    (loop (cdr es) (cons e body))]
                   [else            (loop (cdr es) (cons e body))])))))))

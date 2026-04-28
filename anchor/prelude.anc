@@ -202,6 +202,58 @@
                 var))))]))
 
 
+(define-syntax tiny-struct
+  (macro-case ()
+    [(_ name (field size) ...)
+     (let* ([sname   (symbol->string (id-sym name))]
+            [fields  (map id-sym field)]
+            [sizes   size]
+            [n       (length fields)]
+            [offsets (let loop ([ss sizes] [off 0] [acc '()])
+                       (if (null? ss) (reverse acc)
+                           (loop (cdr ss) (+ off (car ss)) (cons off acc))))]
+            [masks   (map (lambda (s) (- (expt 2 s) 1)) sizes)]
+            [total-bits  (apply + sizes)]
+            [total-bytes (quotient (+ total-bits 7) 8)])
+       (when (> total-bits 64)
+         (anchor-error "tiny-struct: total size exceeds 64 bits" (id-sym name)))
+       (let* ([get-clauses
+               (let loop ([i 0] [fs fields] [os offsets] [ms masks])
+                 (if (null? fs) '()
+                     (cons `[(_ v ,(car fs))
+                             ,(cond
+                                [(= i 0)       `(band v ,(car ms))]
+                                [(= i (- n 1)) `(rshift v ,(car os))]
+                                [else           `(band (rshift v ,(car os)) ,(car ms))])]
+                           (loop (+ i 1) (cdr fs) (cdr os) (cdr ms)))))]
+              [set-clauses
+               (let loop ([i 0] [fs fields] [os offsets] [ms masks])
+                 (if (null? fs) '()
+                     (let ([clear (bitwise-not (bitwise-arithmetic-shift-left (car ms) (car os)))])
+                       (cons `[(_ v ,(car fs) new)
+                               (bor (band v ,clear)
+                                    ,(if (= i 0)
+                                         `(band new ,(car ms))
+                                         `(lshift (band new ,(car ms)) ,(car os))))]
+                             (loop (+ i 1) (cdr fs) (cdr os) (cdr ms))))))]
+              [ctor-body
+               (let loop ([i 0] [fs fields] [os offsets] [ms masks])
+                 (if (null? fs) 0
+                     (let* ([term (if (= i 0) (car fs) `(lshift ,(car fs) ,(car os)))]
+                            [rest (loop (+ i 1) (cdr fs) (cdr os) (cdr ms))])
+                       (if (eqv? rest 0) term `(bor ,term ,rest)))))])
+         `(do
+            (register-sizeof ,(id-sym name) ,total-bytes)
+            (define-syntax ,(id-sym name)
+              (syntax-rules ()
+                [(_ ,@fields) ,ctor-body]))
+            (define-syntax ,(string->symbol (string-append sname "-get"))
+              (syntax-rules ,fields
+                ,@get-clauses))
+            (define-syntax ,(string->symbol (string-append sname "-set"))
+              (syntax-rules ,fields
+                ,@set-clauses)))))]))
+
 (ffi strlen (const char*) -> int)
 (ffi memcpy (void* void* size_t) -> void*)
 

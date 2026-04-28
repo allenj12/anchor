@@ -580,6 +580,54 @@ Auto-incrementing (omit the value):
 (enum Color Red Green Blue)   ; Red=0, Green=1, Blue=2
 ```
 
+### Tiny structs
+
+`tiny-struct` packs named bit fields into a single `AnchorVal` scalar — no allocation,
+no pointer, just inline bit operations. Field sizes are in **bits**. Total must be ≤ 64.
+
+```anchor
+(tiny-struct Color (r 8) (g 8) (b 8) (a 8))   ; 32 bits = 4 bytes
+
+(let c (Color 255 128 64 200))     ; constructor — packed into one integer
+(Color-get c r)                     ; → 255  (first field: mask only, no shift)
+(Color-get c g)                     ; → 128  (shift + mask)
+(Color-get c a)                     ; → 200  (last field: shift only, no mask)
+
+(let c2 (Color-set c g 42))        ; returns NEW value — no mutation
+(Color-get c2 g)                    ; → 42
+(Color-get c g)                     ; → 128  (original unchanged)
+```
+
+Value semantics: `Color-set` returns a new packed integer. The original is unchanged.
+This is different from regular structs, which mutate through a pointer.
+
+`sizeof` works — returns the byte count (bits rounded up):
+
+```anchor
+(sizeof Color)                      ; → 4
+```
+
+Tiny structs compose with regular structs for storage:
+
+```anchor
+(struct Pixel (color (sizeof Color)) (x 4) (y 4))
+
+(let p (alloc (sizeof Pixel)))
+(set! p Pixel color (Color 255 0 0 255))
+(let c (get p Pixel color))
+(Color-get c r)                     ; → 255
+```
+
+Fields can be any bit width — not just byte-aligned:
+
+```anchor
+(tiny-struct Flags (read 1) (write 1) (exec 1) (mode 5))   ; 8 bits = 1 byte
+
+(let f (Flags 1 1 0 3))
+(Flags-get f mode)                  ; → 3
+(let f2 (Flags-set f exec 1))      ; flip exec on
+```
+
 ### Globals and constants
 
 ```anchor
