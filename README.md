@@ -28,6 +28,7 @@ Run a file:
 ./anchorc examples/hello.anc -o hello       # compile to binary
 ./anchorc examples/hello.anc -o hello.c     # emit C only
 ./anchorc examples/hello.anc --emit-exp     # print macro-expanded AST
+./anchorc examples/hello.anc --multi-threaded -o hello  # thread-safe arena pointer (uses _Thread_local)
 ```
 
 ---
@@ -143,6 +144,10 @@ as in C — they apply to the innermost enclosing `while`.
 
 All functions return `AnchorVal`. `main` is the exception — it returns `int`.
 Tail calls are not optimized; use `while` for loops.
+
+Anchor identifiers are mapped to valid C names: `-` → `_`, `!` → `_mut`,
+`?` → `_p`, `.` → `_dot_`, `>` → `gt_`, `<` → `lt_`, `%` → `_pct_`.
+So `string->symbol` becomes `string_gt_symbol` in the generated C.
 
 ### Arithmetic
 
@@ -433,13 +438,18 @@ otherwise. Useful for asserting that a pointer was allocated from the expected a
   (printf "unexpected allocation source\n"))
 ```
 
-`(ref expr)` takes a stack address; `(deref ptr)` reads through one. Useful for
-passing values by pointer to C functions that write into them.
+`(ref expr)` takes the address of a value; `(deref ptr)` reads through one. When
+the argument is a plain variable, `ref` takes its address directly (no copy). For
+complex expressions, a temporary is created.
 
 ```anchor
 (let n 0)
-(some-c-fn (ref n))     ; passes &n
+(some-c-fn (ref n))     ; passes &n directly
 (let result (deref ptr))
+
+; useful for treating a scalar as a C string (e.g. packed symbols)
+(let s (sym hello))
+(printf "%s\n" (cast char* (ref s)))   ; prints "hello"
 ```
 
 ### Structs
@@ -604,6 +614,48 @@ level; `null?` simply tests whether the value is zero.
 (set-car! lst 99)          ; replace head value
 (set-cdr! lst (cons 5 nil)) ; replace tail
 ```
+
+### Symbols
+
+Symbols pack short strings (up to 7 bytes UTF-8) into a single `AnchorVal` integer.
+Comparison is a single integer `==` — no `strcmp`, no hashing. The 8th byte is always
+zero, so `(ref s)` yields a valid null-terminated C string for free.
+
+```anchor
+(let status (sym ready))       ; compile-time constant — zero cost
+(let other  (sym waiting))
+
+(if (== status (sym ready))    ; single integer comparison
+  (printf "go!\n"))
+
+(printf "status: %s\n" (cast char* (ref status)))   ; prints "ready"
+```
+
+`sym` is a macro that runs at compile time. The identifier is converted to a UTF-8
+byte sequence and packed into a 64-bit integer literal — no function call in the
+generated C.
+
+For runtime conversion from a C string, use `string->symbol`:
+
+```anchor
+(let s (string->symbol "hello"))   ; runtime — packs bytes via memcpy
+(== s (sym hello))                 ; → 1 (same integer)
+```
+
+Symbols longer than 7 bytes are truncated by `string->symbol` (returns 0 from `sym`
+if the guard fails at compile time). The 7-byte limit covers most identifiers and
+keywords: `default`, `private`, `include`, `message`, `request`, `display`, etc.
+
+---
+
+## Compiler flags
+
+| Flag | Effect |
+|------|--------|
+| `--run` | Compile and execute immediately |
+| `-o FILE` | Output binary (or `.c` if FILE ends in `.c`) |
+| `--emit-exp` | Print macro-expanded AST |
+| `--multi-threaded` | Use `_Thread_local` for the arena pointer. Required for programs that use threads. Without this flag, the arena pointer is a plain global — faster (no TLS overhead) but not thread-safe. |
 
 ---
 

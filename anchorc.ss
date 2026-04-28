@@ -44,6 +44,8 @@
     (let loop ([rest args])
       (cond
         [(null? rest) (values)]
+        [(string=? (car rest) "--multi-threaded")
+         (set! *multi-threaded* #t) (loop (cdr rest))]
         [(string=? (car rest) "--run")
          (set! run? #t) (loop (cdr rest))]
         [(string=? (car rest) "--emit-ast")

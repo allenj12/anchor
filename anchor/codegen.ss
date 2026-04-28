@@ -1,5 +1,7 @@
 ;;; codegen.ss — Anchor AST → C source
 
+(define *multi-threaded* #f)
+
 (define *anchor-runtime-h*
 "#include <stddef.h>
 #include <stdint.h>
@@ -48,7 +50,11 @@ typedef struct _AnchorArena {
     struct _AnchorArena* prev;
 } _AnchorArena;
 
+#ifdef ANCHOR_MULTI_THREADED
 static _Thread_local _AnchorArena* _anchor_arena_top = NULL;
+#else
+static _AnchorArena* _anchor_arena_top = NULL;
+#endif
 #define ANCHOR_DEFAULT_ARENA_CAP (1024 * 1024)
 
 static inline AnchorVal anchor_alloc(size_t size) {
@@ -157,6 +163,9 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
                            [(#\-) (cons #\_ (loop (cdr cs)))]
                            [(#\!) (append (string->list "_mut") (loop (cdr cs)))]
                            [(#\?) (append (string->list "_p")   (loop (cdr cs)))]
+                           [(#\>) (append (string->list "gt_")  (loop (cdr cs)))]
+                           [(#\<) (append (string->list "lt_")  (loop (cdr cs)))]
+                           [(#\%) (append (string->list "_pct_") (loop (cdr cs)))]
                            [(#\.) (append (string->list "_dot_") (loop (cdr cs)))]
                            [else  (cons (car cs) (loop (cdr cs)))]))))])
     (if (null? marks)
@@ -510,9 +519,12 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
          ;; ref / deref
          [(eq? h 'ref)
           (unless (fx= (length args) 1) (anchor-error "ref: (ref expr)"))
-          (let* ([iv (emit-expr (car args) ctx pre)] [tmp (ctx-tmp! ctx)])
-            (pre-add! pre (string-append "AnchorVal " tmp "_base = " iv ";"))
-            (string-append "anchor_ext((void*)&" tmp "_base)"))]
+          (let ([arg (car args)])
+            (if (sym? arg)
+              (string-append "anchor_ext((void*)&" (c-ident arg) ")")
+              (let* ([iv (emit-expr arg ctx pre)] [tmp (ctx-tmp! ctx)])
+                (pre-add! pre (string-append "AnchorVal " tmp "_base = " iv ";"))
+                (string-append "anchor_ext((void*)&" tmp "_base)"))))]
 
          [(eq? h 'deref)
           (unless (fx= (length args) 1) (anchor-error "deref: (deref expr)"))
@@ -1707,7 +1719,9 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
           (let ([body (reverse body)])
             (for-each (lambda (e) (emit-stmt e ctx)) body)
             ;; Assemble output
-            (let ([parts (list *anchor-runtime-h*)])
+            (let ([parts (list (if *multi-threaded*
+                                    (string-append "#define ANCHOR_MULTI_THREADED 1\n" *anchor-runtime-h*)
+                                    *anchor-runtime-h*))])
               (when (pair? (ctx-fwd-decls ctx))
                 (set! parts (append parts (list "") (ctx-fwd-decls ctx))))
               (when (pair? (ctx-globals ctx))

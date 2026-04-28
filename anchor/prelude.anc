@@ -189,3 +189,26 @@
      (do (hoist (fn _lam (_lam-env params ...) body ...))
          (cons (fn-ptr _lam) 0))]))
 
+(define-syntax sym
+  (macro-case ()
+    [(_ s)
+     (symbol? (id-sym s))
+     (let* ([str (string->utf8 (symbol->string (id-sym s)))]
+            [len (bytevector-length str)])
+       (and (fx<= len 7)
+            (let loop ([i 0] [var 0])
+              (if (fx< i len)
+                (loop (fx1+ i) (logor var (ash (bytevector-u8-ref str i) (fx* i 8))))
+                var))))]))
+
+
+(ffi strlen (const char*) -> int)
+(ffi memcpy (void* void* size_t) -> void*)
+
+(fn string->symbol (s)
+  (let slen (strlen s))
+  (let r 0)
+  (if (< slen 8)
+    (do (memcpy (ref r) s slen)
+        (return r))
+    (return r)))
