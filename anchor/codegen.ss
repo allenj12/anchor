@@ -1558,20 +1558,25 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
   ;; (enum Name (Variant value) ...)
   ;; Emits: #define Name_Variant value
   ;; Registers enum name with size 4 for use in (sizeof-enum Name).
+  ;; At top level, emit to fwd-decls so they precede hoisted functions (lambdas).
+  ;; Inside a function body (ctx-fn-ret is set), emit inline.
   (let* ([name (id-sym (cadr node))]
          [cn   (c-ident name)])
     (hashtable-set! (ctx-enums ctx) name 4)
-    (ctx-emit! ctx (string-append "/* enum " (symbol->string name) " */"))
-    (let loop ([variants (cddr node)] [i 0])
-      (unless (null? variants)
-        (let* ([v    (car variants)]
-               [vn   (c-ident (if (pair? v) (car v) v))]
-               [val  (if (and (pair? v) (pair? (cdr v)))
-                         (number->string (cadr v))
-                         (number->string i))])
-          (ctx-emit! ctx (string-append "#define " cn "_" vn " " val))
-          (loop (cdr variants) (fx+ i 1)))))
-    (ctx-emit-blank! ctx)))
+    (let ([emit! (if (ctx-fn-ret ctx)
+                     (lambda (line) (ctx-emit! ctx line))
+                     (lambda (line) (ctx-fwd-decls-set! ctx (append (ctx-fwd-decls ctx) (list line)))))])
+      (emit! (string-append "/* enum " (symbol->string name) " */"))
+      (let loop ([variants (cddr node)] [i 0])
+        (unless (null? variants)
+          (let* ([v    (car variants)]
+                 [vn   (c-ident (if (pair? v) (car v) v))]
+                 [val  (if (and (pair? v) (pair? (cdr v)))
+                           (number->string (cadr v))
+                           (number->string i))])
+            (emit! (string-append "#define " cn "_" vn " " val))
+            (loop (cdr variants) (fx+ i 1)))))
+      (emit! ""))))
 
 (define (parse-fn-sig node)
   ;; node = (fn name (params...) body...)
