@@ -179,21 +179,35 @@ Create them with `(f32 expr)`:
 (let a (f32 3.14))          ; f32 literal
 (let b (f32 2.0))
 (let c (f32+ a b))          ; f32 arithmetic
-(printf "%f\n" (f32->f64 c)) ; widen to f64 for printing
+(printf "%f\n" (cast double (f32->f64 c)))  ; widen to f64, cast for printf
 ```
 
-Conversion between representations:
+**Conversions** use the `->` family, which actually converts between representations:
 
 | Form | Description |
 |------|-------------|
 | `(f32 expr)` | Create f32 from literal or integer |
+| `(int->f64 expr)` | Convert integer → f64 |
+| `(int->f32 expr)` | Convert integer → f32 |
 | `(f64->f32 expr)` | Narrow f64 → f32 |
 | `(f32->f64 expr)` | Widen f32 → f64 |
+| `(f64->int expr)` | Truncate f64 → integer |
 | `(f32->int expr)` | Truncate f32 → integer |
 
-**FFI and floats:** The FFI respects C types at the boundary. A `float` param expects
-f32 bits; a `double` param expects f64 bits. The compiler does **not** auto-convert —
-the AnchorVal must already hold the right representation:
+**`cast` vs `->`:** `cast` does not convert — it tells C what type the AnchorVal
+already holds. The `->` functions actually convert between representations:
+
+```anchor
+; cast = "this is already a double, unwrap it for C"
+(printf "%f\n" (cast double 3.14))
+
+; -> = "convert this integer into f64 representation, then unwrap"
+(printf "%f\n" (cast double (int->f64 42)))
+```
+
+**FFI and floats:** Both `ffi` and `fn-c` respect C types at the boundary. A `float`
+param expects f32 bits; a `double` param expects f64 bits. The compiler does **not**
+auto-convert — the AnchorVal must already hold the right representation:
 
 ```anchor
 (ffi sqrtf (float) -> float)
@@ -205,8 +219,7 @@ the AnchorVal must already hold the right representation:
 ```
 
 Return values follow the same rule: `-> float` returns an f32 AnchorVal,
-`-> double` returns an f64 AnchorVal. Use `f32->f64` to widen an f32 result
-when needed (e.g., for printf or f64 arithmetic).
+`-> double` returns an f64 AnchorVal.
 
 ### Character literals
 

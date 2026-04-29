@@ -502,6 +502,16 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
                 ;; runtime value — could be int or f64, cast through double then float
                 (string-append "anchor_f32((float)_ANCH_IVAL(" (emit-expr arg ctx pre) "))"))))]
 
+         ;; int->f64 — convert integer to f64
+         [(eq? h 'int->f64)
+          (unless (fx= (length args) 1) (anchor-error "int->f64 requires 1 argument"))
+          (string-append "anchor_float((double)_ANCH_IVAL(" (emit-expr (car args) ctx pre) "))")]
+
+         ;; int->f32 — convert integer to f32
+         [(eq? h 'int->f32)
+          (unless (fx= (length args) 1) (anchor-error "int->f32 requires 1 argument"))
+          (string-append "anchor_f32((float)_ANCH_IVAL(" (emit-expr (car args) ctx pre) "))")]
+
          ;; f32->f64 — widen f32 to f64
          [(eq? h 'f32->f64)
           (unless (fx= (length args) 1) (anchor-error "f32->f64 requires 1 argument"))
@@ -512,12 +522,17 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
           (unless (fx= (length args) 1) (anchor-error "f64->f32 requires 1 argument"))
           (string-append "anchor_f32((float)_ANCH_FVAL(" (emit-expr (car args) ctx pre) "))")]
 
-         ;; f32->int — convert f32 to integer
+         ;; f64->int — convert f64 to integer (truncates)
+         [(eq? h 'f64->int)
+          (unless (fx= (length args) 1) (anchor-error "f64->int requires 1 argument"))
+          (string-append "anchor_int((intptr_t)_ANCH_FVAL(" (emit-expr (car args) ctx pre) "))")]
+
+         ;; f32->int — convert f32 to integer (truncates)
          [(eq? h 'f32->int)
           (unless (fx= (length args) 1) (anchor-error "f32->int requires 1 argument"))
           (string-append "anchor_int((intptr_t)_ANCH_F32VAL(" (emit-expr (car args) ctx pre) "))")]
 
-         ;; cast
+         ;; cast — type assertion / reinterpret for FFI boundary
          [(eq? h 'cast)
           (unless (fx= (length args) 2) (anchor-error "cast: (cast TYPE expr)"))
           (let ([ct (cast-type-str (car args))]
@@ -526,9 +541,9 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
               [(pointer-type? ct)
                (string-append "anchor_ext((" ct ")_anch_ptr(" iv "))")]
               [(string=? ct "double")
-               (string-append "anchor_float((double)_ANCH_FVAL(" iv "))")]
+               (string-append "anchor_float(_ANCH_FVAL(" iv "))")]
               [(string=? ct "float")
-               (string-append "anchor_f32((float)_ANCH_F32VAL(" iv "))")]
+               (string-append "anchor_f32(_ANCH_F32VAL(" iv "))")]
               [else
                (string-append "anchor_int((intptr_t)(" ct ")_ANCH_IVAL(" iv "))") ]))]
 
@@ -1056,7 +1071,8 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
                 [iv (emit-expr (caddr node) ctx pre)])
            (cond
              [(pointer-type? ct) (string-append "((" ct ")_anch_ptr(" iv "))")]
-             [(or (string=? ct "double") (string=? ct "float")) (string-append "_ANCH_FVAL(" iv ")")]
+             [(string=? ct "double") (string-append "_ANCH_FVAL(" iv ")")]
+             [(string=? ct "float") (string-append "_ANCH_F32VAL(" iv ")")]
              [else (string-append "(" ct ")_ANCH_IVAL(" iv ")")]))]
         [else
          (let ([iv (emit-expr node ctx pre)])
