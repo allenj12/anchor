@@ -47,19 +47,50 @@
     [else '()]))
 
 (define (ellipsis-bound-vars pattern literals)
-  ;; Vars that appear under (pat ...) — these get list bindings from matching
-  (cond
-    [(pair? pattern)
-     (let loop ([items pattern] [acc '()])
-       (cond
-         [(null? items) acc]
-         [(and (pair? (cdr items)) (eq? (cadr items) '...))
-          (loop (cddr items)
-                (append (pattern-vars (car items) literals) acc))]
-         [else
-          (loop (cdr items)
-                (append (ellipsis-bound-vars (car items) literals) acc))]))]
-    [else '()]))
+  ;; Returns alist of (symbol . depth) for vars under ellipsis.
+  ;; Depth 1 = one ..., depth 2 = nested ... ..., etc.
+  (define (ebv pat depth)
+    (cond
+      [(pair? pat)
+       (let loop ([items pat] [acc '()])
+         (cond
+           [(null? items) acc]
+           [(and (pair? (cdr items)) (eq? (cadr items) '...))
+            (loop (cddr items)
+                  (append (map (lambda (v)
+                                 (let ([existing (assq v acc)])
+                                   (if existing
+                                       ;; already seen at a deeper level, keep higher depth
+                                       (cons v (max (cdr existing) (fx+ depth 1)))
+                                       (cons v (fx+ depth 1)))))
+                               (pattern-vars (car items) literals))
+                          (ebv (car items) (fx+ depth 1))
+                          acc))]
+           [else
+            (loop (cdr items)
+                  (append (ebv (car items) depth) acc))]))]
+      [else '()]))
+  ;; Deduplicate, keeping highest depth for each variable
+  (let ([raw (ebv pattern 0)])
+    (let loop ([rest raw] [acc '()])
+      (if (null? rest) acc
+          (let* ([entry (car rest)]
+                 [existing (assq (car entry) acc)])
+            (if existing
+                (if (fx> (cdr entry) (cdr existing))
+                    (loop (cdr rest)
+                          (cons entry (filter (lambda (e) (not (eq? (car e) (car entry)))) acc)))
+                    (loop (cdr rest) acc))
+                (loop (cdr rest) (cons entry acc))))))))
+
+(define (evar-depth sym evars)
+  ;; Returns the ellipsis depth of sym in evars, or 0 if not an evar.
+  (let ([entry (assq sym evars)])
+    (if entry (cdr entry) 0)))
+
+(define (evar? sym evars)
+  ;; Is sym an ellipsis-bound variable?
+  (and (assq sym evars) #t))
 
 ;; ---------------------------------------------------------------------------
 ;; Pattern matching
@@ -164,7 +195,7 @@
   ;; Don't look inside (... subtemplate) — ellipsis is escaped there.
   (cond
     [(symbol? template)
-     (if (memv template evars) (list template) '())]
+     (if (evar? template evars) (list template) '())]
     [(ellipsis-escape? template) '()]
     [(pair? template)
      (append (ellipsis-vars-in (car template) evars)
@@ -175,7 +206,7 @@
   (cond
     [(symbol? template)
      (let ([b (assq template bindings)])
-       (if (and b (not (memv template evars)))
+       (if (and b (not (evar? template evars)))
            (cdr b)
            template))]
     [(ellipsis-escape? template)
@@ -192,7 +223,7 @@
     [(eq? template '...) '...]
     [(symbol? template)
      (let ([b (assq template bindings)])
-       (if (and b (not (memv template evars)))
+       (if (and b (not (evar? template evars)))
            (cdr b)
            template))]
     [(ellipsis-escape? template)
@@ -236,7 +267,15 @@
                                            (cons (car e) (list-ref (cdr e) k))
                                            e))
                                      bindings)]
-                        [sub-ev (filter (lambda (v) (not (memv v used-ev))) evars)]
+                        ;; Decrement depth for used evars; remove if now depth 0
+                        [sub-ev (let loop ([ev evars] [acc '()])
+                                  (if (null? ev) acc
+                                      (let ([e (car ev)])
+                                        (if (memv (car e) used-ev)
+                                            (if (fx> (cdr e) 1)
+                                                (loop (cdr ev) (cons (cons (car e) (fx- (cdr e) 1)) acc))
+                                                (loop (cdr ev) acc))
+                                            (loop (cdr ev) (cons e acc))))))]
                         [expanded (instantiate item sub-b sub-ev)])
                    (expand (fx+ k 1) (cons expanded r))))))))]
       [else
@@ -376,7 +415,7 @@
      (instantiate-escaped (cadr template) bindings evars)]
     [(symbol? template)
      (let ([b (assq template bindings)])
-       (if (and b (not (memv template evars))) (cdr b) template))]
+       (if (and b (not (evar? template evars))) (cdr b) template))]
     [(pair? template)
      (instantiate-quasi-list template bindings evars holes)]
     [else template]))
@@ -413,7 +452,14 @@
                                                (cons (car e) (list-ref (cdr e) k))
                                                e))
                                          bindings)]
-                            [sub-ev (filter (lambda (v) (not (memv v used-ev))) evars)]
+                            [sub-ev (let loop ([ev evars] [acc '()])
+                                      (if (null? ev) acc
+                                          (let ([e (car ev)])
+                                            (if (memv (car e) used-ev)
+                                                (if (fx> (cdr e) 1)
+                                                    (loop (cdr ev) (cons (cons (car e) (fx- (cdr e) 1)) acc))
+                                                    (loop (cdr ev) acc))
+                                                (loop (cdr ev) (cons e acc))))))]
                             [expanded (instantiate-quasi item sub-b sub-ev holes)])
                        (expand (fx+ k 1) (cons expanded r))))))))]
       [else

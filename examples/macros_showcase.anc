@@ -245,6 +245,42 @@
     (my-mul * 1))
 
 ; ---------------------------------------------------------------------------
+; 9. Nested ellipsis: patterns with (sub ...) ...
+;
+;    syntax-rules supports arbitrarily nested ellipsis.  Pattern variables
+;    under a single ... are bound to lists; under nested (x ...) ... they
+;    become lists of lists.  Each ... level in the template peels one nesting.
+; ---------------------------------------------------------------------------
+
+; emit-row-sums: each (x ...) group becomes a separate + and printf
+(define-syntax emit-row-sums
+  (syntax-rules ()
+    [(_ (x ...) ...)
+     (do (printf "row = %lld\n" (+ x ...)) ...)]))
+
+; emit-named-sums: structured sub-pattern (name val ...)
+; name is at depth 1, val is at depth 2
+(define-syntax emit-named-sums
+  (syntax-rules ()
+    [(_ (name val ...) ...)
+     (do (printf "%s = %lld\n" (cast char* name) (+ 0 val ...)) ...)]))
+
+; table-print: mixed depth — title at depth 0, row-label at depth 1, val at depth 2
+(define-syntax table-print
+  (syntax-rules ()
+    [(_ title (row-label (val ...) ) ...)
+     (do
+       (printf "=== %s ===\n" (cast char* title))
+       (printf "  %s: %lld\n" (cast char* row-label) (+ 0 val ...)) ...)]))
+
+; emit-pairs: deeply structured ((a b) ...) ... — two levels of nesting
+(define-syntax emit-pairs
+  (syntax-rules ()
+    [(_ ((a b) ...) ...)
+     (do (do (printf "(%lld,%lld) " a b)
+             ... (printf "\n")) ...)]))
+
+; ---------------------------------------------------------------------------
 ; Use define-struct: emits struct + constructor + accessors as top-level forms.
 ; expand-all splices the resulting (do ...) so codegen sees each independently.
 ; ---------------------------------------------------------------------------
@@ -334,6 +370,20 @@
     (printf "clamp(150,0,100) = %d\n" (cast int clamped))
     (let clamped2 (clamp -5 0 100))
     (printf "clamp(-5,0,100)  = %d\n" (cast int clamped2))
+
+    ; --- nested ellipsis ---
+    (emit-row-sums (1 2 3) (10 20) (100 200 300 400))
+
+    (emit-named-sums
+      ("first" 1 2 3)
+      ("second" 10 20 30 40))
+
+    (table-print "Scores"
+      ("Alice" (90 85 92))
+      ("Bob"   (70 80 75)))
+
+    (emit-pairs ((1 2) (3 4) (5 6))
+                ((10 20) (30 40)))
 
     ; --- define-struct generated accessors and constructor ---
     ; define-struct emitted: struct Vec2, make-Vec2, Vec2-x, Vec2-y
