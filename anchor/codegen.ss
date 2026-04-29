@@ -161,8 +161,6 @@ static inline ANCHOR_PURE AnchorVal anchor_gef32(AnchorVal a, AnchorVal b) { ret
 
 /* ---- Logical ---- */
 
-static inline ANCHOR_PURE AnchorVal anchor_and(AnchorVal a, AnchorVal b) { return (AnchorVal)(!!a && !!b); }
-static inline ANCHOR_PURE AnchorVal anchor_or (AnchorVal a, AnchorVal b) { return (AnchorVal)(!!a || !!b); }
 static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { return (AnchorVal)(!a); }
 ")
 
@@ -346,8 +344,8 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
     (u<  . "anchor_ltu") (u>  . "anchor_gtu") (u<= . "anchor_leu") (u>= . "anchor_geu")))
 
 (define *logic-ops*
-  `((&& . "anchor_and")
-    (,(string->symbol "||") . "anchor_or")))
+  `((&& . "&&")
+    (,(string->symbol "||") . "||")))
 
 (define *type-qualifiers*
   '("const" "volatile" "restrict" "unsigned" "signed" "long" "short" "_Atomic"))
@@ -485,8 +483,8 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
           => (lambda (p)
                (unless (fx= (length args) 2)
                  (anchor-error (symbol->string (id-sym h)) "requires exactly 2 arguments"))
-               (string-append (cdr p) "(" (emit-expr (car args) ctx pre)
-                              ", " (emit-expr (cadr args) ctx pre) ")"))]
+               (string-append "(AnchorVal)(!!" (emit-expr (car args) ctx pre)
+                              " " (cdr p) " !!" (emit-expr (cadr args) ctx pre) ")"))]
 
          [(eq? h '!)
           (unless (fx= (length args) 1) (anchor-error "! requires 1 argument"))
