@@ -153,16 +153,60 @@ So `string->symbol` becomes `string_gt_symbol` in the generated C.
 
 ```anchor
 (+ a b)    (- a b)    (* a b)    (/ a b)    (% a b)   ; signed integer
-(f+ a b)   (f- a b)   (f* a b)   (f/ a b)             ; float (double)
+(f+ a b)   (f- a b)   (f* a b)   (f/ a b)             ; float64 (double)
+(f32+ a b) (f32- a b) (f32* a b) (f32/ a b)           ; float32
 (u+ a b)   (u- a b)   (u* a b)   (u/ a b)   (u% a b)  ; unsigned
 
 (band x mask)   (bor x y)   (bxor x y)   (bnot x)
 (lshift x n)    (rshift x n)
 
 (== a b)  (!= a b)  (< a b)  (> a b)  (<= a b)  (>= a b)
-(f== a b) (f!= a b) (f< a b) (f> a b) (f<= a b) (f>= a b)  ; float
-(u< a b)  (u> a b)  (u<= a b) (u>= a b)                    ; unsigned
+(f== a b) (f!= a b) (f< a b) (f> a b) (f<= a b) (f>= a b)    ; float64
+(f32== a b) (f32!= a b) (f32< a b) (f32> a b) (f32<= a b) (f32>= a b)  ; float32
+(u< a b)  (u> a b)  (u<= a b) (u>= a b)                      ; unsigned
 ```
+
+### Floats
+
+Bare decimal literals like `0.5` produce **f64** (double) values — the bit pattern of
+the double is stored directly in the AnchorVal. Use `f+`, `f-`, `f*`, `f/` and the
+`f==`/`f<`/etc. comparisons.
+
+**f32** (float) values store 32-bit IEEE 754 bits in the low 32 bits of the AnchorVal.
+Create them with `(f32 expr)`:
+
+```anchor
+(let a (f32 3.14))          ; f32 literal
+(let b (f32 2.0))
+(let c (f32+ a b))          ; f32 arithmetic
+(printf "%f\n" (f32->f64 c)) ; widen to f64 for printing
+```
+
+Conversion between representations:
+
+| Form | Description |
+|------|-------------|
+| `(f32 expr)` | Create f32 from literal or integer |
+| `(f64->f32 expr)` | Narrow f64 → f32 |
+| `(f32->f64 expr)` | Widen f32 → f64 |
+| `(f32->int expr)` | Truncate f32 → integer |
+
+**FFI and floats:** The FFI respects C types at the boundary. A `float` param expects
+f32 bits; a `double` param expects f64 bits. The compiler does **not** auto-convert —
+the AnchorVal must already hold the right representation:
+
+```anchor
+(ffi sqrtf (float) -> float)
+(ffi sqrt  (double) -> double)
+
+(sqrtf (f32 2.0))     ; f32 in → f32 out
+(sqrtf (f64->f32 x))  ; narrow f64 to f32 before calling
+(sqrt 2.0)            ; f64 in → f64 out
+```
+
+Return values follow the same rule: `-> float` returns an f32 AnchorVal,
+`-> double` returns an f64 AnchorVal. Use `f32->f64` to widen an f32 result
+when needed (e.g., for printf or f64 arithmetic).
 
 ### Character literals
 

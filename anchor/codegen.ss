@@ -31,9 +31,13 @@ typedef uint64_t AnchorVal;
 /* Integer value: identity cast */
 #define _ANCH_IVAL(v)  ((intptr_t)(int64_t)(v))
 
-/* Float: reinterpret bits as double */
+/* Float64: reinterpret bits as double */
 #define _ANCH_FVAL(v) \
     ({ AnchorVal _av = (v); double _fv; __builtin_memcpy(&_fv, &_av, sizeof(double)); _fv; })
+
+/* Float32: reinterpret low 32 bits as float */
+#define _ANCH_F32VAL(v) \
+    ({ uint32_t _bv = (uint32_t)(v); float _fv; __builtin_memcpy(&_fv, &_bv, sizeof(float)); _fv; })
 
 #if defined(__GNUC__) || defined(__clang__)
 #  define ANCHOR_PURE __attribute__((const))
@@ -97,6 +101,16 @@ static inline ANCHOR_PURE AnchorVal anchor_subf(AnchorVal a, AnchorVal b) { retu
 static inline ANCHOR_PURE AnchorVal anchor_mulf(AnchorVal a, AnchorVal b) { return anchor_float(_ANCH_FVAL(a) * _ANCH_FVAL(b)); }
 static inline ANCHOR_PURE AnchorVal anchor_divf(AnchorVal a, AnchorVal b) { return anchor_float(_ANCH_FVAL(a) / _ANCH_FVAL(b)); }
 
+/* ---- Float32 constructor / arithmetic ---- */
+
+static inline ANCHOR_PURE AnchorVal anchor_f32(float v) {
+    uint32_t bits; __builtin_memcpy(&bits, &v, sizeof(float)); return (AnchorVal)bits;
+}
+static inline ANCHOR_PURE AnchorVal anchor_addf32(AnchorVal a, AnchorVal b) { return anchor_f32(_ANCH_F32VAL(a) + _ANCH_F32VAL(b)); }
+static inline ANCHOR_PURE AnchorVal anchor_subf32(AnchorVal a, AnchorVal b) { return anchor_f32(_ANCH_F32VAL(a) - _ANCH_F32VAL(b)); }
+static inline ANCHOR_PURE AnchorVal anchor_mulf32(AnchorVal a, AnchorVal b) { return anchor_f32(_ANCH_F32VAL(a) * _ANCH_F32VAL(b)); }
+static inline ANCHOR_PURE AnchorVal anchor_divf32(AnchorVal a, AnchorVal b) { return anchor_f32(_ANCH_F32VAL(a) / _ANCH_F32VAL(b)); }
+
 /* ---- Comparisons — direct on raw values ---- */
 
 static inline ANCHOR_PURE AnchorVal anchor_eq(AnchorVal a, AnchorVal b) { return (AnchorVal)((int64_t)a == (int64_t)b); }
@@ -135,6 +149,15 @@ static inline ANCHOR_PURE AnchorVal anchor_ltf(AnchorVal a, AnchorVal b) { retur
 static inline ANCHOR_PURE AnchorVal anchor_gtf(AnchorVal a, AnchorVal b) { return (AnchorVal)(_ANCH_FVAL(a) >  _ANCH_FVAL(b)); }
 static inline ANCHOR_PURE AnchorVal anchor_lef(AnchorVal a, AnchorVal b) { return (AnchorVal)(_ANCH_FVAL(a) <= _ANCH_FVAL(b)); }
 static inline ANCHOR_PURE AnchorVal anchor_gef(AnchorVal a, AnchorVal b) { return (AnchorVal)(_ANCH_FVAL(a) >= _ANCH_FVAL(b)); }
+
+/* ---- Float32 comparisons ---- */
+
+static inline ANCHOR_PURE AnchorVal anchor_eqf32(AnchorVal a, AnchorVal b) { return (AnchorVal)(_ANCH_F32VAL(a) == _ANCH_F32VAL(b)); }
+static inline ANCHOR_PURE AnchorVal anchor_nef32(AnchorVal a, AnchorVal b) { return (AnchorVal)(_ANCH_F32VAL(a) != _ANCH_F32VAL(b)); }
+static inline ANCHOR_PURE AnchorVal anchor_ltf32(AnchorVal a, AnchorVal b) { return (AnchorVal)(_ANCH_F32VAL(a) <  _ANCH_F32VAL(b)); }
+static inline ANCHOR_PURE AnchorVal anchor_gtf32(AnchorVal a, AnchorVal b) { return (AnchorVal)(_ANCH_F32VAL(a) >  _ANCH_F32VAL(b)); }
+static inline ANCHOR_PURE AnchorVal anchor_lef32(AnchorVal a, AnchorVal b) { return (AnchorVal)(_ANCH_F32VAL(a) <= _ANCH_F32VAL(b)); }
+static inline ANCHOR_PURE AnchorVal anchor_gef32(AnchorVal a, AnchorVal b) { return (AnchorVal)(_ANCH_F32VAL(a) >= _ANCH_F32VAL(b)); }
 
 /* ---- Logical ---- */
 
@@ -307,6 +330,7 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
   '((+  . "anchor_add")  (-  . "anchor_sub")  (*  . "anchor_mul")
     (/  . "anchor_div")  (%  . "anchor_mod")
     (f+ . "anchor_addf") (f- . "anchor_subf")  (f* . "anchor_mulf") (f/ . "anchor_divf")
+    (f32+ . "anchor_addf32") (f32- . "anchor_subf32") (f32* . "anchor_mulf32") (f32/ . "anchor_divf32")
     (u+ . "anchor_addu") (u- . "anchor_subu")  (u* . "anchor_mulu")
     (u/ . "anchor_divu") (u% . "anchor_modu")
     (band . "anchor_band") (bor . "anchor_bor") (bxor . "anchor_bxor")
@@ -317,6 +341,8 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
     (<   . "anchor_lt")  (>   . "anchor_gt")  (<=  . "anchor_le")  (>=  . "anchor_ge")
     (f== . "anchor_eqf") (f!= . "anchor_nef")
     (f<  . "anchor_ltf") (f>  . "anchor_gtf") (f<= . "anchor_lef") (f>= . "anchor_gef")
+    (f32== . "anchor_eqf32") (f32!= . "anchor_nef32")
+    (f32<  . "anchor_ltf32") (f32>  . "anchor_gtf32") (f32<= . "anchor_lef32") (f32>= . "anchor_gef32")
     (u<  . "anchor_ltu") (u>  . "anchor_gtu") (u<= . "anchor_leu") (u>= . "anchor_geu")))
 
 (define *logic-ops*
@@ -463,6 +489,34 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
           (unless (fx= (length args) 1) (anchor-error "bnot requires 1 argument"))
           (string-append "anchor_bnot(" (emit-expr (car args) ctx pre) ")")]
 
+         ;; f32 — convert int or f64 to f32 bit pattern
+         [(eq? h 'f32)
+          (unless (fx= (length args) 1) (anchor-error "f32 requires 1 argument"))
+          (let ([arg (car args)])
+            (if (and (number? arg) (inexact? arg))
+              ;; f64 literal → f32
+              (string-append "anchor_f32((float)" (number->string arg) ")")
+              (if (number? arg)
+                ;; int literal → f32
+                (string-append "anchor_f32((float)" (number->string arg) ")")
+                ;; runtime value — could be int or f64, cast through double then float
+                (string-append "anchor_f32((float)_ANCH_IVAL(" (emit-expr arg ctx pre) "))"))))]
+
+         ;; f32->f64 — widen f32 to f64
+         [(eq? h 'f32->f64)
+          (unless (fx= (length args) 1) (anchor-error "f32->f64 requires 1 argument"))
+          (string-append "anchor_float((double)_ANCH_F32VAL(" (emit-expr (car args) ctx pre) "))")]
+
+         ;; f64->f32 — narrow f64 to f32
+         [(eq? h 'f64->f32)
+          (unless (fx= (length args) 1) (anchor-error "f64->f32 requires 1 argument"))
+          (string-append "anchor_f32((float)_ANCH_FVAL(" (emit-expr (car args) ctx pre) "))")]
+
+         ;; f32->int — convert f32 to integer
+         [(eq? h 'f32->int)
+          (unless (fx= (length args) 1) (anchor-error "f32->int requires 1 argument"))
+          (string-append "anchor_int((intptr_t)_ANCH_F32VAL(" (emit-expr (car args) ctx pre) "))")]
+
          ;; cast
          [(eq? h 'cast)
           (unless (fx= (length args) 2) (anchor-error "cast: (cast TYPE expr)"))
@@ -471,8 +525,10 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
             (cond
               [(pointer-type? ct)
                (string-append "anchor_ext((" ct ")_anch_ptr(" iv "))")]
-              [(or (string=? ct "double") (string=? ct "float"))
+              [(string=? ct "double")
                (string-append "anchor_float((double)_ANCH_FVAL(" iv "))")]
+              [(string=? ct "float")
+               (string-append "anchor_f32((float)_ANCH_F32VAL(" iv "))")]
               [else
                (string-append "anchor_int((intptr_t)(" ct ")_ANCH_IVAL(" iv "))") ]))]
 
@@ -963,9 +1019,12 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
       (begin (pre-add! pre (string-append call ";")) "anchor_int(0)")
       (let ([tmp (ctx-tmp! ctx)])
         (cond
-          [(or (string=? ret "double") (string=? ret "float"))
-           (pre-add! pre (string-append ret " " tmp "_raw = " call ";"))
-           (pre-add! pre (string-append "AnchorVal " tmp " = anchor_float((double)" tmp "_raw);"))]
+          [(string=? ret "double")
+           (pre-add! pre (string-append "double " tmp "_raw = " call ";"))
+           (pre-add! pre (string-append "AnchorVal " tmp " = anchor_float(" tmp "_raw);"))]
+          [(string=? ret "float")
+           (pre-add! pre (string-append "float " tmp "_raw = " call ";"))
+           (pre-add! pre (string-append "AnchorVal " tmp " = anchor_f32(" tmp "_raw);"))]
           [(pointer-type? ret)
            (pre-add! pre (string-append ret " " tmp "_raw = " call ";"))
            (pre-add! pre (string-append "AnchorVal " tmp " = anchor_ext((void*)" tmp "_raw);"))]
@@ -1004,7 +1063,8 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
            (if ptype
                (cond
                  [(pointer-type? ptype) (string-append "((" ptype ")_anch_ptr(" iv "))")]
-                 [(or (string=? ptype "double") (string=? ptype "float")) (string-append "_ANCH_FVAL(" iv ")")]
+                 [(string=? ptype "double") (string-append "_ANCH_FVAL(" iv ")")]
+                 [(string=? ptype "float") (string-append "_ANCH_F32VAL(" iv ")")]
                  [else (string-append "(" ptype ")_ANCH_IVAL(" iv ")")])
                iv))])))
 
@@ -1086,6 +1146,16 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
                            [(pointer-type? ret)
                             (let ([tmp (ctx-tmp! ctx)])
                               (ctx-emit! ctx (string-append ret " " tmp " = (" ret ")_anch_ptr(" e ");"))
+                              (for-each (lambda (s) (ctx-emit! ctx s)) (ctx-arena-cleanup ctx))
+                              (ctx-emit! ctx (string-append "return " tmp ";")))]
+                           [(string=? ret "double")
+                            (let ([tmp (ctx-tmp! ctx)])
+                              (ctx-emit! ctx (string-append "double " tmp " = _ANCH_FVAL(" e ");"))
+                              (for-each (lambda (s) (ctx-emit! ctx s)) (ctx-arena-cleanup ctx))
+                              (ctx-emit! ctx (string-append "return " tmp ";")))]
+                           [(string=? ret "float")
+                            (let ([tmp (ctx-tmp! ctx)])
+                              (ctx-emit! ctx (string-append "float " tmp " = _ANCH_F32VAL(" e ");"))
                               (for-each (lambda (s) (ctx-emit! ctx s)) (ctx-arena-cleanup ctx))
                               (ctx-emit! ctx (string-append "return " tmp ";")))]
                            [else
@@ -1780,11 +1850,19 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
                 (let* ([c-type (car p)]
                        [pname  (cdr p)]
                        [raw    (string-append "_raw_" pname)]
-                       [wrap   (if (pointer-type? c-type)
-                                   (string-append "AnchorVal " pname
-                                                  " = anchor_ext((void*)" raw ");")
-                                   (string-append "AnchorVal " pname
-                                                  " = anchor_int((intptr_t)" raw ");"))])
+                       [wrap   (cond
+                                 [(pointer-type? c-type)
+                                  (string-append "AnchorVal " pname
+                                                 " = anchor_ext((void*)" raw ");")]
+                                 [(string=? c-type "double")
+                                  (string-append "AnchorVal " pname
+                                                 " = anchor_float(" raw ");")]
+                                 [(string=? c-type "float")
+                                  (string-append "AnchorVal " pname
+                                                 " = anchor_f32(" raw ");")]
+                                 [else
+                                  (string-append "AnchorVal " pname
+                                                 " = anchor_int((intptr_t)" raw ");")])])
                   (ctx-emit! ctx wrap)))
               parsed)
     ;; Optional arena setup (when wrapped in with-arena)
