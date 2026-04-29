@@ -561,6 +561,18 @@ A bare number or expression in `get`/`set!` is a **byte offset** into the buffer
 (let v (get arr (* i 8)))     ; scalar read at offset i*8
 ```
 
+For sub-8-byte elements, pass a byte size after the offset:
+
+```anchor
+(let buf (alloc (* n 3)))         ; array of 3-byte integers
+(set! buf 0 3 100)                ; write 3 bytes at offset 0
+(set! buf 3 3 200)                ; write 3 bytes at offset 3
+(let v (get buf (* i 3) 3))      ; read 3 bytes at offset i*3
+```
+
+Literal sizes are checked at compile time (must be ≤ 8). Runtime sizes
+emit a trap guard; use `memcpy` directly to avoid the check.
+
 Array of structs — byte offset then named chain in one form:
 
 ```anchor

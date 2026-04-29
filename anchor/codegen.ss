@@ -611,6 +611,98 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
                  (pre-add! pre (string-append "__builtin_memcpy(&" tmp ", _ANCH_HPTR(" a "), 8);"))
                  tmp)]))]
 
+         ;; %sized-read — read N bytes from address into AnchorVal (zero-extended)
+         ;; (%sized-read addr size)
+         [(eq? h '%sized-read)
+          (unless (fx= (length args) 2) (anchor-error "%sized-read: (%sized-read addr size)"))
+          (let ([addr-arg (car args)] [sz-arg (cadr args)])
+            (if (number? sz-arg)
+              ;; Literal size — check at compile time, no runtime guard
+              (let ([sz (exact sz-arg)])
+                (when (fx> sz 8) (anchor-error "%sized-read: size exceeds 8 bytes" sz))
+                (let ([sz-e (number->string sz)])
+                  (cond
+                    [(and (pair? addr-arg) (eq? (id-sym (car addr-arg)) '%ptr+))
+                     (let* ([ro    (cdr addr-arg)]
+                            [ptr-e (emit-expr (car ro) ctx pre)]
+                            [off-e (emit-expr (cadr ro) ctx pre)]
+                            [tmp   (ctx-tmp! ctx)])
+                       (pre-add! pre (string-append "AnchorVal " tmp " = 0;"))
+                       (pre-add! pre (string-append "__builtin_memcpy(&" tmp ", (char*)_ANCH_HPTR(" ptr-e ") + _ANCH_IVAL(" off-e "), " sz-e ");"))
+                       tmp)]
+                    [else
+                     (let* ([a   (emit-expr addr-arg ctx pre)]
+                            [tmp (ctx-tmp! ctx)])
+                       (pre-add! pre (string-append "AnchorVal " tmp " = 0;"))
+                       (pre-add! pre (string-append "__builtin_memcpy(&" tmp ", _ANCH_HPTR(" a "), " sz-e ");"))
+                       tmp)])))
+              ;; Runtime size — emit trap guard
+              (let ([sz-e (string-append "_ANCH_IVAL(" (emit-expr sz-arg ctx pre) ")")])
+                (pre-add! pre (string-append "if (" sz-e " > 8) __builtin_trap();"))
+                (cond
+                  [(and (pair? addr-arg) (eq? (id-sym (car addr-arg)) '%ptr+))
+                   (let* ([ro    (cdr addr-arg)]
+                          [ptr-e (emit-expr (car ro) ctx pre)]
+                          [off-e (emit-expr (cadr ro) ctx pre)]
+                          [tmp   (ctx-tmp! ctx)])
+                     (pre-add! pre (string-append "AnchorVal " tmp " = 0;"))
+                     (pre-add! pre (string-append "__builtin_memcpy(&" tmp ", (char*)_ANCH_HPTR(" ptr-e ") + _ANCH_IVAL(" off-e "), " sz-e ");"))
+                     tmp)]
+                  [else
+                   (let* ([a   (emit-expr addr-arg ctx pre)]
+                          [tmp (ctx-tmp! ctx)])
+                     (pre-add! pre (string-append "AnchorVal " tmp " = 0;"))
+                     (pre-add! pre (string-append "__builtin_memcpy(&" tmp ", _ANCH_HPTR(" a "), " sz-e ");"))
+                     tmp)]))))]
+
+         ;; %sized-store — write N bytes of val to address
+         ;; (%sized-store addr size val)
+         [(eq? h '%sized-store)
+          (unless (fx= (length args) 3) (anchor-error "%sized-store: (%sized-store addr size val)"))
+          (let ([addr-arg (car args)] [sz-arg (cadr args)] [val-arg (caddr args)])
+            (if (number? sz-arg)
+              ;; Literal size — check at compile time
+              (let ([sz (exact sz-arg)])
+                (when (fx> sz 8) (anchor-error "%sized-store: size exceeds 8 bytes" sz))
+                (let ([sz-e (number->string sz)])
+                  (cond
+                    [(and (pair? addr-arg) (eq? (id-sym (car addr-arg)) '%ptr+))
+                     (let* ([ro    (cdr addr-arg)]
+                            [ptr-e (emit-expr (car ro) ctx pre)]
+                            [off-e (emit-expr (cadr ro) ctx pre)]
+                            [v     (emit-expr val-arg ctx pre)]
+                            [tmp   (ctx-tmp! ctx)])
+                       (pre-add! pre (string-append "{ AnchorVal " tmp " = " v ";"))
+                       (pre-add! pre (string-append "  __builtin_memcpy((char*)_ANCH_HPTR(" ptr-e ") + _ANCH_IVAL(" off-e "), &" tmp ", " sz-e "); }"))
+                       "ANCHOR_NIL")]
+                    [else
+                     (let* ([a   (emit-expr addr-arg ctx pre)]
+                            [v   (emit-expr val-arg ctx pre)]
+                            [tmp (ctx-tmp! ctx)])
+                       (pre-add! pre (string-append "{ AnchorVal " tmp " = " v ";"))
+                       (pre-add! pre (string-append "  __builtin_memcpy(_ANCH_HPTR(" a "), &" tmp ", " sz-e "); }"))
+                       "ANCHOR_NIL")])))
+              ;; Runtime size — emit trap guard
+              (let ([sz-e (string-append "_ANCH_IVAL(" (emit-expr sz-arg ctx pre) ")")])
+                (pre-add! pre (string-append "if (" sz-e " > 8) __builtin_trap();"))
+                (cond
+                  [(and (pair? addr-arg) (eq? (id-sym (car addr-arg)) '%ptr+))
+                   (let* ([ro    (cdr addr-arg)]
+                          [ptr-e (emit-expr (car ro) ctx pre)]
+                          [off-e (emit-expr (cadr ro) ctx pre)]
+                          [v     (emit-expr val-arg ctx pre)]
+                          [tmp   (ctx-tmp! ctx)])
+                     (pre-add! pre (string-append "{ AnchorVal " tmp " = " v ";"))
+                     (pre-add! pre (string-append "  __builtin_memcpy((char*)_ANCH_HPTR(" ptr-e ") + _ANCH_IVAL(" off-e "), &" tmp ", " sz-e "); }"))
+                     "ANCHOR_NIL")]
+                  [else
+                   (let* ([a   (emit-expr addr-arg ctx pre)]
+                          [v   (emit-expr val-arg ctx pre)]
+                          [tmp (ctx-tmp! ctx)])
+                     (pre-add! pre (string-append "{ AnchorVal " tmp " = " v ";"))
+                     (pre-add! pre (string-append "  __builtin_memcpy(_ANCH_HPTR(" a "), &" tmp ", " sz-e "); }"))
+                     "ANCHOR_NIL")]))))]
+
          ;; %store — write AnchorVal to address
          ;; (%store addr val)
          [(eq? h '%store)

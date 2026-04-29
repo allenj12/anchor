@@ -43,6 +43,10 @@
     [(_ ptr S f S2 rest ...)
      (and (is-struct? S) (is-struct? S2))
      `(get (%addr-offset ,ptr ,S ,f) ,S2 ,@rest)]
+    ;; sized read terminal: (get ptr off sz) — read sz bytes at offset
+    [(_ ptr off sz)
+     (and (not (is-struct? off)) (not (is-struct? sz)))
+     `(%sized-read (%ptr+ ,ptr ,off) ,sz)]
     ;; byte-offset + pointer follow: (get ptr off -> rest ...)
     [(_ ptr off -> rest ...)
      `(get (%scalar (%ptr+ ,ptr ,off)) ,@rest)]
@@ -122,6 +126,10 @@
     [(_ ptr off -> rest ...)
      (not (is-struct? off))
      `(set! (%scalar (%ptr+ ,ptr ,off)) ,@rest)]
+    ;; sized write terminal: (set! ptr off sz v) — write sz bytes at offset
+    [(_ ptr off sz v)
+     (and (not (is-struct? off)) (not (is-struct? sz)))
+     `(%sized-store (%ptr+ ,ptr ,off) ,sz ,v)]
     ;; byte-offset terminal write: (set! ptr off v) — raw scalar store
     [(_ ptr off v)
      (not (is-struct? off))
