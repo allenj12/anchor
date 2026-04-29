@@ -243,7 +243,8 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
     (mutable var-depth    ctx-var-depth    ctx-var-depth-set!)
     (mutable global-arenas ctx-global-arenas ctx-global-arenas-set!) ; sym → c-var (string)
     (mutable hoisted       ctx-hoisted       ctx-hoisted-set!)       ; lines hoisted to file scope
-    (mutable fns           ctx-fns           ctx-fns-set!))          ; sym → C-name string for known top-level fns
+    (mutable fns           ctx-fns           ctx-fns-set!)           ; sym → C-name string for known top-level fns
+    (mutable loop-arena-stack ctx-loop-arena-stack ctx-loop-arena-stack-set!)) ; arena stack at loop entry (for break/continue cleanup)
   (protocol
     (lambda (new)
       (lambda ()
@@ -251,7 +252,7 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
              (make-eq-hashtable) (make-eq-hashtable) (make-eq-hashtable)
              '() #f '() '() 0
              (make-eq-hashtable) (make-eq-hashtable) '()
-             (make-eq-hashtable))))))
+             (make-eq-hashtable) #f)))))
 
 (define (ctx-emit! ctx line)
   (ctx-lines-set! ctx
@@ -270,22 +271,48 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
 ;; Arena stack entries:
 ;;   (av . use-heap?) — arena var name (C string) + whether buf was malloc'd
 ;;   ('restore . saved-var) — for with-parent-arena: restore top to saved-var
+;;   ('checkpoint . sv) — for with-arena-checkpoint: restore used + checkpoint
 (define (ctx-push-arena! ctx av use-heap?)
   (ctx-arena-stack-set! ctx (cons (cons av use-heap?) (ctx-arena-stack ctx))))
 (define (ctx-push-restore! ctx saved-var)
   (ctx-arena-stack-set! ctx (cons (cons 'restore saved-var) (ctx-arena-stack ctx))))
+(define (ctx-push-checkpoint! ctx sv)
+  (ctx-arena-stack-set! ctx (cons (cons 'checkpoint sv) (ctx-arena-stack ctx))))
 (define (ctx-pop-arena!  ctx) (ctx-arena-stack-set! ctx (cdr (ctx-arena-stack ctx))))
 (define (ctx-in-arena?   ctx) (pair? (ctx-arena-stack ctx)))
 
-;; Emit teardown for all arenas on stack (used on early return).
-;; Note: heap-buf frees are NOT emitted here — only top pointer restoration.
-;; Early returns from large arenas will leak the buffer (acceptable trade-off).
+;; Emit teardown for arenas on stack down to `stop` (default: all).
+;; Restores arena top pointer and frees heap-allocated buffers.
+(define (arena-cleanup-down-to stack stop)
+  (if (eq? stack stop) '()
+      (apply append
+        (map (lambda (entry)
+               (cond
+                 [(eq? (car entry) 'restore)
+                  (list (string-append "_anchor_arena_top = " (cdr entry) ";"))]
+                 [(eq? (car entry) 'checkpoint)
+                  (let ([sv (cdr entry)])
+                    (list (string-append "_anchor_arena_top->used = " sv "_used;")
+                          (string-append "_anchor_arena_top->checkpoint = " sv "_prev;")))]
+                 [(cdr entry)  ; use-heap?
+                  (list (string-append "__builtin_free(" (car entry) "_buf);")
+                        (string-append "_anchor_arena_top = " (car entry) ".prev;"))]
+                 [else
+                  (list (string-append "_anchor_arena_top = " (car entry) ".prev;"))]))
+             (let loop ([s stack] [acc '()])
+               (if (eq? s stop) (reverse acc)
+                   (loop (cdr s) (cons (car s) acc))))))))
+
+;; Full cleanup — all arenas (used by return)
 (define (ctx-arena-cleanup ctx)
-  (map (lambda (entry)
-         (if (eq? (car entry) 'restore)
-             (string-append "_anchor_arena_top = " (cdr entry) ";")
-             (string-append "_anchor_arena_top = " (car entry) ".prev;")))
-       (ctx-arena-stack ctx)))
+  (arena-cleanup-down-to (ctx-arena-stack ctx) '()))
+
+;; Partial cleanup — arenas pushed since loop entry (used by break/continue)
+(define (ctx-loop-arena-cleanup ctx)
+  (let ([saved (ctx-loop-arena-stack ctx)])
+    (if saved
+        (arena-cleanup-down-to (ctx-arena-stack ctx) saved)
+        '())))
 
 (define (ctx-output ctx) (str-join (reverse (ctx-lines ctx)) "\n"))
 
@@ -1211,8 +1238,11 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
           ;; while
           [(eq? h 'while)
            (when (fx< (length args) 2) (anchor-error "while: (while cond body...)"))
-           (let* ([pre    (make-pre)]
+           (let* ([saved-loop-stack (ctx-loop-arena-stack ctx)]
+                  [pre    (make-pre)]
                   [cond-e (emit-expr (car args) ctx pre)])
+             ;; Save current arena stack as the loop boundary for break/continue cleanup
+             (ctx-loop-arena-stack-set! ctx (ctx-arena-stack ctx))
              (if (null? (pre-list pre))
                  ;; Simple condition — no temporaries, plain while.
                  (begin
@@ -1242,11 +1272,16 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
                    (for-each (lambda (s) (emit-stmt s ctx)) (cdr args))
                    (for-each (lambda (a) (ctx-emit! ctx a)) assigns)
                    (ctx-dedent! ctx)
-                   (ctx-emit! ctx "}"))))]
+                   (ctx-emit! ctx "}")))
+             (ctx-loop-arena-stack-set! ctx saved-loop-stack))]
 
-          ;; break / continue
-          [(eq? h 'break)    (ctx-emit! ctx "break;")]
-          [(eq? h 'continue) (ctx-emit! ctx "continue;")]
+          ;; break / continue — emit arena cleanup for arenas pushed inside the loop
+          [(eq? h 'break)
+           (for-each (lambda (s) (ctx-emit! ctx s)) (ctx-loop-arena-cleanup ctx))
+           (ctx-emit! ctx "break;")]
+          [(eq? h 'continue)
+           (for-each (lambda (s) (ctx-emit! ctx s)) (ctx-loop-arena-cleanup ctx))
+           (ctx-emit! ctx "continue;")]
 
           ;; do
           [(eq? h 'do)
@@ -1630,7 +1665,7 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
            (set! av global-arena)
            (ctx-emit! ctx (string-append global-arena ".prev = _anchor_arena_top;"))
            (ctx-emit! ctx (string-append "_anchor_arena_top = &" global-arena ";"))
-           (ctx-push-arena! ctx global-arena #t)
+           (ctx-push-arena! ctx global-arena #f)
            (ctx-arena-depth-set! ctx (fx+ (ctx-arena-depth ctx) 1))
            (set! has-arena #t)]
           [arena-sz
@@ -1644,7 +1679,7 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
                  (ctx-emit! ctx (string-append "char " av "_buf[" cap "];")))
              (ctx-emit! ctx (string-append "_AnchorArena " av " = {" av "_buf, " cap ", 0, 0, _anchor_arena_top};"))
              (ctx-emit! ctx (string-append "_anchor_arena_top = &" av ";"))
-             (ctx-push-arena! ctx av #f)
+             (ctx-push-arena! ctx av use-heap)
              (ctx-arena-depth-set! ctx (fx+ (ctx-arena-depth ctx) 1))
              (set! has-arena #t))])
         (for-each (lambda (s) (emit-stmt s ctx)) body)
@@ -1689,7 +1724,7 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
                (ctx-indent! ctx)
                (ctx-emit! ctx (string-append cname ".prev = _anchor_arena_top;"))
                (ctx-emit! ctx (string-append "_anchor_arena_top = &" cname ";"))
-               (ctx-push-arena! ctx cname #t)
+               (ctx-push-arena! ctx cname #f)
                (ctx-arena-depth-set! ctx (fx+ (ctx-arena-depth ctx) 1))
                (for-each (lambda (f) (emit-stmt f ctx)) body)
                (ctx-emit! ctx (string-append "_anchor_arena_top = " cname ".prev;"))
@@ -1717,7 +1752,7 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
                    (ctx-emit! ctx (string-append "char " av "_buf[" cap "];")))
                (ctx-emit! ctx (string-append "_AnchorArena " av " = {" av "_buf, " cap ", 0, 0, _anchor_arena_top};"))
                (ctx-emit! ctx (string-append "_anchor_arena_top = &" av ";"))
-               (ctx-push-arena! ctx av #f)
+               (ctx-push-arena! ctx av use-heap)
                (ctx-arena-depth-set! ctx (fx+ (ctx-arena-depth ctx) 1))
                (for-each (lambda (f) (emit-stmt f ctx)) body)
                (ctx-emit! ctx (string-append "_anchor_arena_top = " av ".prev;"))
@@ -1758,10 +1793,14 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
       (ctx-emit! ctx (string-append "size_t " sv "_used = _anchor_arena_top->used;"))
       (ctx-emit! ctx (string-append "size_t " sv "_prev = _anchor_arena_top->checkpoint;"))
       (ctx-emit! ctx (string-append "_anchor_arena_top->checkpoint = _anchor_arena_top->used;"))
+      (ctx-push-checkpoint! ctx sv)
+      (ctx-arena-depth-set! ctx (fx+ (ctx-arena-depth ctx) 1))
       (for-each (lambda (s) (emit-stmt s ctx)) body)
       ;; Restore used and previous checkpoint
       (ctx-emit! ctx (string-append "_anchor_arena_top->used = " sv "_used;"))
       (ctx-emit! ctx (string-append "_anchor_arena_top->checkpoint = " sv "_prev;"))
+      (ctx-pop-arena! ctx)
+      (ctx-arena-depth-set! ctx (fx- (ctx-arena-depth ctx) 1))
       (ctx-dedent! ctx)
       (ctx-emit! ctx "}"))))
 
@@ -1898,7 +1937,7 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
          (set! av global-arena)
          (ctx-emit! ctx (string-append global-arena ".prev = _anchor_arena_top;"))
          (ctx-emit! ctx (string-append "_anchor_arena_top = &" global-arena ";"))
-         (ctx-push-arena! ctx global-arena #t)
+         (ctx-push-arena! ctx global-arena #f)
          (ctx-arena-depth-set! ctx (fx+ (ctx-arena-depth ctx) 1))]
         [arena-sz
          (set! av "_anc_arena")
@@ -1911,7 +1950,7 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
                (ctx-emit! ctx (string-append "char " av "_buf[" cap "];")))
            (ctx-emit! ctx (string-append "_AnchorArena " av " = {" av "_buf, " cap ", 0, 0, _anchor_arena_top};"))
            (ctx-emit! ctx (string-append "_anchor_arena_top = &" av ";"))
-           (ctx-push-arena! ctx av #f)
+           (ctx-push-arena! ctx av use-heap)
            (ctx-arena-depth-set! ctx (fx+ (ctx-arena-depth ctx) 1)))])
     ;; Emit body; ctx-fn-ret set so return emits the right C cast
     (let ([prev-ret (ctx-fn-ret ctx)])
