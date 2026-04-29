@@ -379,12 +379,14 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
     [(bytevector? node)
      (let* ([tmp  (ctx-tmp! ctx)]
             [len  (bytevector-length node)]
-            [elts (let loop ([i 0] [acc '()])
-                    (if (fx= i len) (reverse acc)
-                        (loop (fx+ i 1)
-                              (cons (number->string (bytevector-u8-ref node i)) acc))))]
-            [decl (string-append "static const unsigned char " tmp "_data[] = {"
-                                 (str-join elts ", ") "};")])
+            [body (let ([p (open-output-string)])
+                    (let loop ([i 0])
+                      (when (fx< i len)
+                        (when (fx> i 0) (display "," p))
+                        (display (bytevector-u8-ref node i) p)
+                        (loop (fx+ i 1))))
+                    (get-output-string p))]
+            [decl (string-append "static const unsigned char " tmp "_data[] = {" body "};")])
        (ctx-fwd-decls-set! ctx (append (ctx-fwd-decls ctx) (list decl)))
        (string-append "anchor_ext((void*)" tmp "_data)"))]
 
@@ -430,12 +432,14 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
             (anchor-error "embed-bytes: expected a single bytevector literal"))
           (let* ([bv   (car args)]
                  [tmp  (ctx-tmp! ctx)]
-                 [elts (let loop ([i 0] [acc '()])
-                         (if (fx= i (bytevector-length bv)) (reverse acc)
-                             (loop (fx+ i 1)
-                                   (cons (number->string (bytevector-u8-ref bv i)) acc))))]
-                 [decl (string-append "static const uint8_t " tmp "_bytes[] = {"
-                                      (str-join elts ", ") "};")])
+                 [body (let ([p (open-output-string)])
+                         (let loop ([i 0])
+                           (when (fx< i (bytevector-length bv))
+                             (when (fx> i 0) (display "," p))
+                             (display (bytevector-u8-ref bv i) p)
+                             (loop (fx+ i 1))))
+                         (get-output-string p))]
+                 [decl (string-append "static const uint8_t " tmp "_bytes[] = {" body "};")])
             (ctx-fwd-decls-set! ctx (append (ctx-fwd-decls ctx) (list decl)))
             (string-append "anchor_ext((void*)" tmp "_bytes)"))]
 
@@ -446,12 +450,15 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
           (let* ([s    (car args)]
                  [tmp  (ctx-tmp! ctx)]
                  [bv   (string->utf8 s)]
-                 [elts (let loop ([i 0] [acc '()])
-                         (if (fx= i (bytevector-length bv)) (reverse (cons "0" acc))
-                             (loop (fx+ i 1)
-                                   (cons (number->string (bytevector-u8-ref bv i)) acc))))]
-                 [decl (string-append "static const char " tmp "_str[] = {"
-                                      (str-join elts ", ") "};")])
+                 [body (let ([p (open-output-string)])
+                         (let loop ([i 0])
+                           (when (fx< i (bytevector-length bv))
+                             (when (fx> i 0) (display "," p))
+                             (display (bytevector-u8-ref bv i) p)
+                             (loop (fx+ i 1))))
+                         (display ",0" p)
+                         (get-output-string p))]
+                 [decl (string-append "static const char " tmp "_str[] = {" body "};")])
             (ctx-fwd-decls-set! ctx (append (ctx-fwd-decls ctx) (list decl)))
             (string-append "anchor_ext((void*)" tmp "_str)"))]
 
