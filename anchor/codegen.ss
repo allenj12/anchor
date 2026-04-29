@@ -437,7 +437,7 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
                  [decl (string-append "static const uint8_t " tmp "_bytes[] = {"
                                       (str-join elts ", ") "};")])
             (ctx-fwd-decls-set! ctx (append (ctx-fwd-decls ctx) (list decl)))
-            (string-append "anchor_ext((void*)" tmp "_bytes"))]
+            (string-append "anchor_ext((void*)" tmp "_bytes)"))]
 
          ;; embed-string: (embed-string str) — null-terminated string as static data
          [(eq? h 'embed-string)
@@ -1827,7 +1827,7 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
          [parsed    (map (lambda (p)
                            (let* ([syms   (map (lambda (s) (symbol->string (id-sym s))) p)]
                                   [n      (length syms)]
-                                  [pname  (list-ref syms (fx- n 1))]
+                                  [pname  (c-ident (string->symbol (list-ref syms (fx- n 1))))]
                                   [type-s (str-join (list-head syms (fx- n 1)) " ")])
                              (cons type-s pname)))
                          params)]
