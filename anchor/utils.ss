@@ -66,6 +66,18 @@
     [(pair? form)   (cons (add-mark (car form) m) (add-mark (cdr form) m))]
     [else form]))
 
+;; ---------------------------------------------------------------------------
+;; local-expand — let macro-case transformers expand subforms on demand
+;; ---------------------------------------------------------------------------
+
+(define *current-expand* (make-parameter #f))
+
+(define (local-expand form)
+  (let ([exp (*current-expand*)])
+    (unless exp
+      (anchor-error "local-expand: called outside macro expansion"))
+    (exp form)))
+
 ;;; Read entire file into a string
 (define (read-file path)
   (call-with-port (open-input-file path)

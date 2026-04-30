@@ -564,11 +564,11 @@
   ;; environment that eval uses.  Pass all expander helpers the template might
   ;; call as outer lambda parameters so they are closed over lexically rather
   ;; than looked up by name at runtime.
-  ((eval `(lambda (match-pattern anchor-error anchor-error/loc id-sym anchor-gensym instantiate instantiate-quasi datum->syntax is-struct? filter-map)
+  ((eval `(lambda (match-pattern anchor-error anchor-error/loc id-sym anchor-gensym instantiate instantiate-quasi datum->syntax is-struct? filter-map local-expand)
             (lambda (_form)
               ,(build-clause-chain '_form lits-form clauses))))
    match-pattern anchor-error anchor-error/loc id-sym anchor-gensym instantiate instantiate-quasi anc-datum->syntax
-   anchor-is-struct? filter-map))
+   anchor-is-struct? filter-map local-expand))
 
 ;; Identity helpers available in transformer bodies — Anchor AST is plain data.
 (define (anc-syntax->datum stx) stx)
@@ -692,7 +692,8 @@
                           [def-expand (cdr entry)]
                           [m          (fresh-mark)]
                           [in         (add-mark expr m)]
-                          [out        (raw in)]
+                          [out        (parameterize ([*current-expand* expand])
+                                        (raw in))]
                           [marked     (add-mark out m)])
                      (def-expand marked)))]
              [else
