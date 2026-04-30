@@ -394,6 +394,36 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
 ;; Expression emitter — returns a C expression string; side-effects go to pre
 ;; ---------------------------------------------------------------------------
 
+;; Emit a closure call using tagged-pointer convention.
+;; Top 4 bits of closure = capture count.
+;; count=0: fn-ptr call, no env.  count>0: flat struct [fn-ptr, caps...], env = addr+8.
+(define (emit-closure-call closure-expr c-args ctx pre)
+  (let* ([cl   (ctx-tmp! ctx)]
+         [cnt  (ctx-tmp! ctx)]
+         [addr (ctx-tmp! ctx)]
+         [res  (ctx-tmp! ctx)]
+         ;; no-env call (count=0): fn(args...)
+         [ptypes-0   (if (null? c-args) "void"
+                         (str-join (map (lambda (_) "AnchorVal") c-args) ", "))]
+         [cast-0     (string-append "((AnchorVal(*)(" ptypes-0 "))_anch_ptr(" cl "))")]
+         [call-0     (string-append cast-0 "(" (str-join c-args ", ") ")")]
+         ;; env call (count>0): fn(env, args...)
+         [env-expr   (string-append "(AnchorVal)(" addr " + 8)")]
+         [all-args   (cons env-expr c-args)]
+         [ptypes-e   (str-join (map (lambda (_) "AnchorVal") all-args) ", ")]
+         [cast-e     (string-append "((AnchorVal(*)(" ptypes-e "))_anch_ptr(*(AnchorVal*)(uintptr_t)" addr "))")]
+         [call-e     (string-append cast-e "(" (str-join all-args ", ") ")")])
+    (pre-add! pre (string-append "AnchorVal " cl " = " closure-expr ";"))
+    (pre-add! pre (string-append "uint64_t " cnt " = (uint64_t)" cl " >> 60;"))
+    (pre-add! pre (string-append "uint64_t " addr " = (uint64_t)" cl " & 0x0FFFFFFFFFFFFFFFULL;"))
+    (pre-add! pre (string-append "AnchorVal " res ";"))
+    (pre-add! pre (string-append "if (" cnt " == 0) {"))
+    (pre-add! pre (string-append "    " res " = " call-0 ";"))
+    (pre-add! pre "} else {")
+    (pre-add! pre (string-append "    " res " = " call-e ";"))
+    (pre-add! pre "}")
+    res))
+
 (define (emit-expr node ctx pre)
   (cond
     ;; Boolean (#t/#f from transformer bodies or reader)
@@ -1000,31 +1030,18 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
                => (lambda (cn)
                     (let ([c-args (map (lambda (a) (emit-call-arg a ctx pre #f #f)) args)])
                       (string-append cn "(" (str-join c-args ", ") ")")))]
-              ;; Unknown symbol — treat as lambda/closure value: (fn-ptr . env)
-              ;; Emit car/cdr directly via %scalar/%addr-offset to avoid recursion.
+              ;; Unknown symbol — treat as closure value (tagged pointer).
               [else
-               (let* ([head    (car node)]
-                      [fn-ptr  (emit-expr `(%scalar (%addr-offset ,head Cons car)) ctx pre)]
-                      [env     (emit-expr `(%scalar (%addr-offset ,head Cons cdr)) ctx pre)]
-                      [c-args  (map (lambda (a) (emit-call-arg a ctx pre #f #f)) args)]
-                      [all-args (cons env c-args)]
-                      [ptypes  (str-join (map (lambda (_) "AnchorVal") all-args) ", ")]
-                      [fn-cast (string-append "((AnchorVal(*)(" ptypes "))_anch_ptr(" fn-ptr "))")])
-                 (string-append fn-cast "(" (str-join all-args ", ") ")"))]))]
+               (let* ([head-expr (emit-expr (car node) ctx pre)]
+                      [c-args    (map (lambda (a) (emit-call-arg a ctx pre #f #f)) args)])
+                 (emit-closure-call head-expr c-args ctx pre))]))]
 
          ;; Compound-expression call head — head is not a symbol, must be a closure value.
-         ;; Evaluate it into a tmp, then call via closure convention (cons(fn-ptr, env)).
+         ;; Evaluate it into a tmp, then call via tagged closure convention.
          [(pair? h)
-          (let* ([tmp     (ctx-tmp! ctx)]
-                 [tmp-sym (string->symbol tmp)]
-                 [_       (pre-add! pre (string-append "AnchorVal " tmp " = " (emit-expr (car node) ctx pre) ";"))]
-                 [fn-ptr  (emit-expr `(%scalar (%addr-offset ,tmp-sym Cons car)) ctx pre)]
-                 [env     (emit-expr `(%scalar (%addr-offset ,tmp-sym Cons cdr)) ctx pre)]
-                 [c-args  (map (lambda (a) (emit-call-arg a ctx pre #f #f)) args)]
-                 [all-args (cons env c-args)]
-                 [ptypes  (str-join (map (lambda (_) "AnchorVal") all-args) ", ")]
-                 [fn-cast (string-append "((AnchorVal(*)(" ptypes "))_anch_ptr(" fn-ptr "))")])
-            (string-append fn-cast "(" (str-join all-args ", ") ")"))]
+          (let* ([head-expr (emit-expr (car node) ctx pre)]
+                 [c-args    (map (lambda (a) (emit-call-arg a ctx pre #f #f)) args)])
+            (emit-closure-call head-expr c-args ctx pre))]
 
          [else (anchor-error "cannot emit expression" node)]))]
 

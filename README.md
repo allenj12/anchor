@@ -346,9 +346,10 @@ special syntax at the call site.
     ))
 ```
 
-Captures are packed into a linked-list environment allocated in the **current arena**.
-The callable value itself is also arena-allocated. Both live as long as the arena does —
-don't call a lambda after its arena is reset.
+Captures are packed into a flat struct `[fn-ptr, cap0, cap1, ...]` allocated in the
+**current arena**. The capture count is stored in the top 4 bits of the pointer (max 15
+captures). Both live as long as the arena does — don't call a lambda after its arena is
+reset.
 
 Multiple captures work the same way:
 
@@ -361,38 +362,35 @@ Multiple captures work the same way:
 ### Function pointers
 
 `fn-ptr` takes the address of any named function (`fn`, `fn-c`, or `ffi`) and boxes
-it as an `AnchorVal`. The primary use is passing a callback pointer to a C function:
-
-```anchor
-; fn-c defines the callback; fn-ptr passes its address to C
-(ffi qsort (void* size_t size_t void*) -> void)
-(qsort arr n 8 (fn-ptr compare-ints))
-```
-
-`call-ptr` calls through a raw boxed pointer — it casts to the
-`AnchorVal(AnchorVal, ...)` calling convention. Use it for raw function pointer values,
-not for lambdas (which call implicitly):
+it as an `AnchorVal`. The result uses the same calling convention as lambdas — you can
+store it in a variable and call it directly:
 
 ```anchor
 (fn add (a b) (return (+ a b)))
 
 (let fp (fn-ptr add))
-(call-ptr fp 3 4)   ; → 7
+(fp 3 4)   ; → 7
+
+; also works for passing callbacks to C
+(ffi qsort (void* size_t size_t void*) -> void)
+(qsort arr n 8 (fn-ptr compare-ints))
 ```
 
-For `fn-c` or `ffi` function pointers, use `call-ptr-c` with an explicit signature:
+For calling C-typed function pointers (`fn-c` or `ffi`), use `call-ptr-c` with an
+explicit signature:
 
 ```anchor
-(let fp (fn-ptr compare-ints))
-(call-ptr-c fp ((const void* const void*) -> int) (ref x) (ref y))
+(let fp (fn-ptr printf))
+(call-ptr-c fp ((const char* ...) -> int) "x = %d\n" 42)
 ```
 
 The signature `((param-types...) -> ret-type)` matches the `ffi` declaration syntax.
 
-**Calling convention:** named `fn` functions are direct C calls. Lambda and closure
-values carry a `(fn-ptr . env)` representation and use a unified calling convention —
-the callee always receives the environment as a hidden first argument. This means you
-cannot call a raw `fn-ptr` value implicitly; use `call-ptr` for that.
+**Calling convention:** `fn-ptr` and lambda values share a unified tagged-pointer
+convention. The top 4 bits encode the capture count: 0 means direct call (no
+environment), >0 means the pointer addresses a flat struct `[fn-ptr, caps...]` and
+the callee receives the captures as a hidden first argument. This means `fn-ptr` values,
+plain lambdas, and closures are all interchangeable at call sites.
 
 ### Memory and arenas
 

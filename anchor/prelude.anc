@@ -165,37 +165,36 @@
 ;; (lambda (params ...) body ...)              — no captures
 ;; (lambda ((caps ...) (params ...)) body ...) — with captures
 ;;
-;; Both return a cons cell (fn-ptr . env).
-;; Plain lambda has env = 0 (ignored by callee).
-;; Use call-closure to invoke either form.
+;; Flat closure representation:
+;;   0 captures: returns fn-ptr directly (no alloc, no env param).
+;;   N captures: alloc [fn-ptr, cap0, cap1, ...] = (N+1)*8 bytes.
+;;               Capture count stored in top 4 bits of pointer (max 15).
+;;               Call convention: fn(env, args...) where env = addr+8.
 ;; ---------------------------------------------------------------------------
 
-;; Pack captures into a linked list: (cons cap1 (cons cap2 ... 0))
-(define-syntax %pack-env
-  (syntax-rules ()
-    [(_) 0]
-    [(_ v vs ...) (cons v (%pack-env vs ...))]))
-
-;; Unpack env list into let-bindings, then evaluate body
-(define-syntax %unpack-env
-  (syntax-rules ()
-    [(_ _e () body ...) (do body ...)]
-    [(_ _e (c cs ...) body ...)
-     (do (let c (car _e))
-         (%unpack-env (cdr _e) (cs ...) body ...))]))
-
 (define-syntax lambda
-  (syntax-rules ()
-    ;; closure form: first arg is ((caps...) (params...))
+  (macro-case ()
+    ;; closure form: ((caps...) (params...)) body...
     [(_ ((caps ...) (params ...)) body ...)
-     (do (hoist (fn _lam (_lam-env params ...)
-                   (%unpack-env _lam-env (caps ...) body ...)))
-         (let _lam-env (%pack-env caps ...))
-         (cons (fn-ptr _lam) _lam-env))]
-    ;; plain lambda: no captures, env is 0
+     (let* ([ncaps (length caps)])
+       (when (> ncaps 15)
+         (anchor-error "lambda: too many captures (max 15)"))
+       `(do (hoist (fn _lam (_lam-env ,@params)
+                    ,@(let loop ([cs caps] [i 0])
+                        (if (null? cs) body
+                            (cons `(let ,(car cs) (get _lam-env ,(* i 8)))
+                                  (loop (cdr cs) (+ i 1)))))))
+            (let _lam-ptr (alloc ,(* (+ ncaps 1) 8)))
+            (set! _lam-ptr 0 (fn-ptr _lam))
+            ,@(let loop ([cs caps] [i 0])
+                (if (null? cs) '()
+                    (cons `(set! _lam-ptr ,(* (+ i 1) 8) ,(car cs))
+                          (loop (cdr cs) (+ i 1)))))
+            (bor _lam-ptr (lshift ,ncaps 60))))]
+    ;; plain lambda: no captures — no env param, no alloc
     [(_ (params ...) body ...)
-     (do (hoist (fn _lam (_lam-env params ...) body ...))
-         (cons (fn-ptr _lam) 0))]))
+     `(do (hoist (fn _lam (,@params) ,@body))
+          (fn-ptr _lam))]))
 
 (define-syntax sym
   (macro-case ()
