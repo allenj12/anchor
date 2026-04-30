@@ -347,8 +347,7 @@ special syntax at the call site.
 ```
 
 Captures are packed into a flat struct `[fn-ptr, cap0, cap1, ...]` allocated in the
-**current arena**. The capture count is stored in the top 4 bits of the pointer (max 15
-captures). Both live as long as the arena does — don't call a lambda after its arena is
+**current arena**. Bit 63 is set to mark the pointer as a closure. Both live as long as the arena does — don't call a lambda after its arena is
 reset.
 
 Multiple captures work the same way:
@@ -387,8 +386,8 @@ explicit signature:
 The signature `((param-types...) -> ret-type)` matches the `ffi` declaration syntax.
 
 **Calling convention:** `fn-ptr` and lambda values share a unified tagged-pointer
-convention. The top 4 bits encode the capture count: 0 means direct call (no
-environment), >0 means the pointer addresses a flat struct `[fn-ptr, caps...]` and
+convention. Bit 63 flags whether the value is a closure: 0 means direct call (no
+environment), 1 means the pointer addresses a flat struct `[fn-ptr, caps...]` and
 the callee receives the captures as a hidden first argument. This means `fn-ptr` values,
 plain lambdas, and closures are all interchangeable at call sites.
 

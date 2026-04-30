@@ -168,7 +168,7 @@
 ;; Flat closure representation:
 ;;   0 captures: returns fn-ptr directly (no alloc, no env param).
 ;;   N captures: alloc [fn-ptr, cap0, cap1, ...] = (N+1)*8 bytes.
-;;               Capture count stored in top 4 bits of pointer (max 15).
+;;               Bit 63 set to mark as closure.
 ;;               Call convention: fn(env, args...) where env = addr+8.
 ;; ---------------------------------------------------------------------------
 
@@ -177,8 +177,6 @@
     ;; closure form: ((caps...) (params...)) body...
     [(_ ((caps ...) (params ...)) body ...)
      (let* ([ncaps (length caps)])
-       (when (> ncaps 15)
-         (anchor-error "lambda: too many captures (max 15)"))
        `(do (hoist (fn _lam (_lam-env ,@params)
                     ,@(let loop ([cs caps] [i 0])
                         (if (null? cs) body
@@ -190,7 +188,7 @@
                 (if (null? cs) '()
                     (cons `(set! _lam-ptr ,(* (+ i 1) 8) ,(car cs))
                           (loop (cdr cs) (+ i 1)))))
-            (bor _lam-ptr (lshift ,ncaps 60))))]
+            (bor _lam-ptr (lshift 1 63))))]
     ;; plain lambda: no captures — no env param, no alloc
     [(_ (params ...) body ...)
      `(do (hoist (fn _lam (,@params) ,@body))

@@ -395,32 +395,29 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
 ;; ---------------------------------------------------------------------------
 
 ;; Emit a closure call using tagged-pointer convention.
-;; Top 4 bits of closure = capture count.
-;; count=0: fn-ptr call, no env.  count>0: flat struct [fn-ptr, caps...], env = addr+8.
+;; Bit 63: 0 = plain fn-ptr, 1 = closure [fn-ptr, caps...] with env = addr+8.
 (define (emit-closure-call closure-expr c-args ctx pre)
   (let* ([cl   (ctx-tmp! ctx)]
-         [cnt  (ctx-tmp! ctx)]
          [addr (ctx-tmp! ctx)]
          [res  (ctx-tmp! ctx)]
-         ;; no-env call (count=0): fn(args...)
+         ;; no-env call (bit 63 = 0): fn(args...)
          [ptypes-0   (if (null? c-args) "void"
                          (str-join (map (lambda (_) "AnchorVal") c-args) ", "))]
          [cast-0     (string-append "((AnchorVal(*)(" ptypes-0 "))_anch_ptr(" cl "))")]
          [call-0     (string-append cast-0 "(" (str-join c-args ", ") ")")]
-         ;; env call (count>0): fn(env, args...)
+         ;; env call (bit 63 = 1): fn(env, args...)
          [env-expr   (string-append "(AnchorVal)(" addr " + 8)")]
          [all-args   (cons env-expr c-args)]
          [ptypes-e   (str-join (map (lambda (_) "AnchorVal") all-args) ", ")]
          [cast-e     (string-append "((AnchorVal(*)(" ptypes-e "))_anch_ptr(*(AnchorVal*)(uintptr_t)" addr "))")]
          [call-e     (string-append cast-e "(" (str-join all-args ", ") ")")])
     (pre-add! pre (string-append "AnchorVal " cl " = " closure-expr ";"))
-    (pre-add! pre (string-append "uint64_t " cnt " = (uint64_t)" cl " >> 60;"))
-    (pre-add! pre (string-append "uint64_t " addr " = (uint64_t)" cl " & 0x0FFFFFFFFFFFFFFFULL;"))
+    (pre-add! pre (string-append "uint64_t " addr " = (uint64_t)" cl " & 0x7FFFFFFFFFFFFFFFULL;"))
     (pre-add! pre (string-append "AnchorVal " res ";"))
-    (pre-add! pre (string-append "if (" cnt " == 0) {"))
-    (pre-add! pre (string-append "    " res " = " call-0 ";"))
-    (pre-add! pre "} else {")
+    (pre-add! pre (string-append "if ((uint64_t)" cl " >> 63) {"))
     (pre-add! pre (string-append "    " res " = " call-e ";"))
+    (pre-add! pre "} else {")
+    (pre-add! pre (string-append "    " res " = " call-0 ";"))
     (pre-add! pre "}")
     res))
 
