@@ -1,0 +1,439 @@
+(include <stdio.h>)
+(ffi printf (const char* ...) -> int)
+
+;; ---------------------------------------------------------------------------
+;; make-generator v2: supports yield inside while loops and if/else.
+;;
+;; Uses local-expand to see the fully expanded body, then:
+;;   1. Collects all let bindings → persists them in a state struct
+;;   2. Recursively compiles the AST into numbered states
+;;   3. Wraps in a closure with a dispatch-loop (while + if-chain)
+;;
+;; State machine transitions:
+;;   - yield: save vars, set next state, return value
+;;   - while: check-state branches to body or exit
+;;   - if/else: check-state branches to then or else
+;;   - batch (non-yield code): execute, transition to next state
+;; ---------------------------------------------------------------------------
+
+(define-syntax make-generator
+  (macro-case ()
+    [(_ body ...)
+     (let* ([expanded (local-expand `(do ,@body))]
+            [stmts (if (and (pair? expanded) (eq? (id-sym (car expanded)) 'do))
+                       (cdr expanded)
+                       (list expanded))]
+
+            ;; --- has-yield? : does a form contain (yield ...)? ---
+            [has-yield?
+             (let ([hy #f])
+               (set! hy (lambda (form)
+                 (cond
+                   [(not (pair? form)) #f]
+                   [(eq? (id-sym (car form)) 'yield) #t]
+                   [(memq (id-sym (car form)) '(fn lambda)) #f]
+                   [else (let check ([xs (cdr form)])
+                           (cond
+                             [(null? xs) #f]
+                             [(and (pair? (car xs)) (hy (car xs))) #t]
+                             [else (check (cdr xs))]))])))
+               hy)]
+
+            ;; --- Collect all let-bound variable names (recursive) ---
+            [collect-vars
+             (let ([cv #f])
+               (set! cv (lambda (forms)
+                 (if (null? forms) '()
+                     (let ([form (car forms)]
+                           [rest (cdr forms)])
+                       (if (not (pair? form))
+                           (cv rest)
+                           (let ([tag (id-sym (car form))])
+                             (cond
+                               [(memq tag '(fn lambda yield)) (cv rest)]
+                               [(eq? tag 'let)
+                                (cons (cadr form) (append (cv (cddr form)) (cv rest)))]
+                               [(memq tag '(do while if))
+                                (append (cv (cdr form)) (cv rest))]
+                               [else (cv rest)])))))))
+               cv)]
+
+            ;; --- Deduplicate by symbol name ---
+            [var-names
+             (let dedup ([vs (collect-vars stmts)] [seen '()] [acc '()])
+               (if (null? vs)
+                   (reverse acc)
+                   (if (memq (id-sym (car vs)) seen)
+                       (dedup (cdr vs) seen acc)
+                       (dedup (cdr vs) (cons (id-sym (car vs)) seen)
+                              (cons (car vs) acc)))))]
+
+            ;; --- var-info: ((name offset) ...) ---
+            [var-info
+             (let loop ([vs var-names] [off 8] [acc '()])
+               (if (null? vs) (reverse acc)
+                   (loop (cdr vs) (+ off 8)
+                         (cons (list (car vs) off) acc))))]
+
+            [n-vars (length var-info)]
+            [struct-size (* (+ 1 n-vars) 8)]
+
+            ;; --- Lookup offset for a variable name ---
+            [var-offset
+             (lambda (name)
+               (let find ([vis var-info])
+                 (if (null? vis) #f
+                     (if (eq? (id-sym (caar vis)) (id-sym name))
+                         (cadar vis)
+                         (find (cdr vis))))))]
+
+            ;; --- Generate load/save statements for all vars ---
+            [gen-loads
+             (lambda ()
+               (map (lambda (vi) `(let ,(car vi) (get _gs ,(cadr vi))))
+                    var-info))]
+            [gen-saves
+             (lambda ()
+               (map (lambda (vi) `(set! _gs ,(cadr vi) ,(car vi)))
+                    var-info))]
+
+            ;; --- Rewrite (let name val) → (set! name val) for persistent vars ---
+            [rewrite-lets
+             (let ([rw #f])
+               (set! rw (lambda (form)
+                 (cond
+                   [(not (pair? form)) form]
+                   [(memq (id-sym (car form)) '(fn lambda)) form]
+                   [(and (eq? (id-sym (car form)) 'let)
+                         (pair? (cdr form))
+                         (pair? (cddr form))
+                         (var-offset (cadr form)))
+                    `(set! ,(cadr form) ,(rw (caddr form)))]
+                   [else (map rw form)])))
+               rw)]
+
+            ;; --- Rewrite break/continue → state transitions for while-with-yields ---
+            ;; Stops at nested while/fn/lambda boundaries.
+            ;; break  → save vars, set state to after-loop, C continue (re-dispatch)
+            ;; continue → save vars, set state to check, C continue (re-dispatch)
+            [rewrite-bc
+             (let ([rbc #f])
+               (set! rbc (lambda (form break-target cont-target)
+                 (cond
+                   [(not (pair? form)) form]
+                   [(memq (id-sym (car form)) '(fn lambda while)) form]
+                   [(eq? (id-sym (car form)) 'break)
+                    `(do ,@(gen-saves) (set! _gs 0 ,break-target) (continue))]
+                   [(eq? (id-sym (car form)) 'continue)
+                    `(do ,@(gen-saves) (set! _gs 0 ,cont-target) (continue))]
+                   [else (map (lambda (x) (rbc x break-target cont-target)) form)])))
+               rbc)]
+
+            ;; --- Chunk a list of stmts into (batch ...) and (complex form) ---
+            [chunk
+             (lambda (ss)
+               (let loop ([ss ss] [batch '()] [result '()])
+                 (cond
+                   [(null? ss)
+                    (reverse (if (null? batch)
+                                 result
+                                 (cons (cons 'batch (reverse batch)) result)))]
+                   [(has-yield? (car ss))
+                    (let ([flushed (if (null? batch)
+                                      result
+                                      (cons (cons 'batch (reverse batch)) result))])
+                      (loop (cdr ss) '()
+                            (cons (list 'complex (car ss)) flushed)))]
+                   [else
+                    (loop (cdr ss) (cons (car ss) batch) result)])))]
+
+            ;; --- Mutually recursive compile / compile-seq ---
+            [compile #f]
+            [compile-seq #f]
+
+            [_setup
+             (begin
+               ;; compile: form × next-state × counter → (entry counter states)
+               ;; Each state is (idx code-form).
+               (set! compile
+                 (lambda (form next counter)
+                   (let ([tag (id-sym (car form))])
+                     (cond
+                       ;; ---- (yield expr) ----
+                       [(eq? tag 'yield)
+                        (let ([idx counter])
+                          (list idx (+ counter 1)
+                                (list
+                                  (list idx
+                                    `(do ,@(gen-loads)
+                                         ,@(gen-saves)
+                                         (set! _gs 0 ,next)
+                                         (return ,(rewrite-lets (cadr form))))))))]
+
+                       ;; ---- (do stmts...) ----
+                       [(eq? tag 'do)
+                        (compile-seq (cdr form) next counter)]
+
+                       ;; ---- (while cond body...) with yields ----
+                       [(eq? tag 'while)
+                        (let* ([cond-expr (cadr form)]
+                               [wbody (cddr form)]
+                               [check-idx counter]
+                               ;; rewrite break/continue before compiling body
+                               [rwbody (map (lambda (s) (rewrite-bc s next check-idx)) wbody)]
+                               ;; body loops back to check
+                               [body-result (compile-seq rwbody check-idx (+ counter 1))]
+                               [body-entry (car body-result)]
+                               [body-ctr (cadr body-result)]
+                               [body-states (caddr body-result)]
+                               [check-state
+                                (list check-idx
+                                  `(do ,@(gen-loads)
+                                       (if ,(rewrite-lets cond-expr)
+                                         (do ,@(gen-saves) (set! _gs 0 ,body-entry))
+                                         (do ,@(gen-saves) (set! _gs 0 ,next)))))])
+                          (list check-idx body-ctr
+                                (cons check-state body-states)))]
+
+                       ;; ---- (if cond then [else]) with yields ----
+                       [(eq? tag 'if)
+                        (let* ([cond-expr (cadr form)]
+                               [then-form (caddr form)]
+                               [has-else (> (length form) 3)]
+                               [else-form (if has-else (cadddr form) #f)]
+                               [check-idx counter]
+                               [then-result (compile-seq (list then-form) next (+ counter 1))]
+                               [then-entry (car then-result)]
+                               [then-ctr (cadr then-result)]
+                               [then-states (caddr then-result)]
+                               [else-result (if else-form
+                                                (compile-seq (list else-form) next then-ctr)
+                                                (list next then-ctr '()))]
+                               [else-entry (car else-result)]
+                               [else-ctr (cadr else-result)]
+                               [else-states (caddr else-result)]
+                               [check-state
+                                (list check-idx
+                                  `(do ,@(gen-loads)
+                                       (if ,(rewrite-lets cond-expr)
+                                         (do ,@(gen-saves) (set! _gs 0 ,then-entry))
+                                         (do ,@(gen-saves) (set! _gs 0 ,else-entry)))))])
+                          (list check-idx else-ctr
+                                (cons check-state (append then-states else-states))))]
+
+                       ;; fallback
+                       [else (list next counter '())]))))
+
+               ;; compile-seq: stmt-list × next × counter → (entry counter states)
+               (set! compile-seq
+                 (lambda (stmts next counter)
+                   (let* ([chunks (chunk stmts)])
+                     (let loop ([cs (reverse chunks)] [cont next] [ctr counter] [acc '()])
+                       (if (null? cs)
+                           (list cont ctr acc)
+                           (let ([c (car cs)])
+                             (if (eq? (car c) 'batch)
+                                 ;; non-yield batch
+                                 (let* ([batch-stmts (cdr c)]
+                                        [idx ctr]
+                                        [state (list idx
+                                                 `(do ,@(gen-loads)
+                                                      ,@(map rewrite-lets batch-stmts)
+                                                      ,@(gen-saves)
+                                                      (set! _gs 0 ,cont)))])
+                                   (loop (cdr cs) idx (+ ctr 1) (cons state acc)))
+                                 ;; complex yield-containing form
+                                 (let* ([form (cadr c)]
+                                        [result (compile form cont ctr)]
+                                        [entry (car result)]
+                                        [new-ctr (cadr result)]
+                                        [new-states (caddr result)])
+                                   (loop (cdr cs) entry new-ctr
+                                         (append new-states acc))))))))))
+               #t)]
+
+            ;; --- Compile the full body ---
+            [result (compile-seq stmts -1 0)]
+            [entry-state (car result)]
+            [all-states (caddr result)]
+
+            ;; --- Generate nested if/else dispatch ---
+            ;; Only one state fires per while iteration; backward jumps
+            ;; loop correctly via the outer while.
+            [dispatch
+             (let fold ([ss all-states])
+               (if (null? ss)
+                   '(return -1)
+                   `(if (== (get _gs 0) ,(caar ss))
+                      ,(cadar ss)
+                      ,(fold (cdr ss)))))])
+
+       ;; Output: alloc state struct, init state, return closure
+       `(do (let _gs (alloc ,struct-size))
+            (set! _gs 0 ,entry-state)
+            (lambda ((_gs) ())
+              (while 1
+                ,dispatch))))]))
+
+;; ---------------------------------------------------------------------------
+;; for: expands to a while loop — tests that local-expand sees through it
+;; ---------------------------------------------------------------------------
+(define-syntax for
+  (syntax-rules (in)
+    [(_ i in limit body ...)
+     (do (let i 0)
+         (while (< i limit)
+           body ...
+           (set! i (+ i 1))))]))
+
+;; ---------------------------------------------------------------------------
+;; Tests
+;; ---------------------------------------------------------------------------
+
+(with-arena
+  (fn main ()
+
+    ;; Test 1: simple yields (regression — no loops/ifs)
+    (printf "--- test 1: simple ---\n")
+    (let g1 (make-generator
+              (yield 10)
+              (yield 20)
+              (yield 30)))
+    (printf "%lld\n" (g1))   ;; 10
+    (printf "%lld\n" (g1))   ;; 20
+    (printf "%lld\n" (g1))   ;; 30
+    (printf "%lld\n" (g1))   ;; -1
+
+    ;; Test 2: counter with variable persistence (regression)
+    (printf "--- test 2: counter ---\n")
+    (let g2 (make-generator
+              (let i 0)
+              (yield i)
+              (set! i (+ i 1))
+              (yield i)
+              (set! i (+ i 1))
+              (yield i)))
+    (printf "%lld\n" (g2))   ;; 0
+    (printf "%lld\n" (g2))   ;; 1
+    (printf "%lld\n" (g2))   ;; 2
+    (printf "%lld\n" (g2))   ;; -1
+
+    ;; Test 3: while loop
+    (printf "--- test 3: while ---\n")
+    (let g3 (make-generator
+              (let i 0)
+              (while (< i 5)
+                (yield i)
+                (set! i (+ i 1)))))
+    (printf "%lld\n" (g3))   ;; 0
+    (printf "%lld\n" (g3))   ;; 1
+    (printf "%lld\n" (g3))   ;; 2
+    (printf "%lld\n" (g3))   ;; 3
+    (printf "%lld\n" (g3))   ;; 4
+    (printf "%lld\n" (g3))   ;; -1
+
+    ;; Test 4: if/else with yields
+    (printf "--- test 4: if/else ---\n")
+    (let g4 (make-generator
+              (let x 10)
+              (if (> x 5)
+                (yield 1)
+                (yield 0))
+              (yield 99)))
+    (printf "%lld\n" (g4))   ;; 1  (x=10 > 5)
+    (printf "%lld\n" (g4))   ;; 99
+    (printf "%lld\n" (g4))   ;; -1
+
+    ;; Test 5: fibonacci with while loop
+    (printf "--- test 5: fibonacci ---\n")
+    (let fib (make-generator
+               (let a 0)
+               (let b 1)
+               (while 1
+                 (yield a)
+                 (let t (+ a b))
+                 (set! a b)
+                 (set! b t))))
+    (printf "%lld\n" (fib))  ;; 0
+    (printf "%lld\n" (fib))  ;; 1
+    (printf "%lld\n" (fib))  ;; 1
+    (printf "%lld\n" (fib))  ;; 2
+    (printf "%lld\n" (fib))  ;; 3
+    (printf "%lld\n" (fib))  ;; 5
+    (printf "%lld\n" (fib))  ;; 8
+    (printf "%lld\n" (fib))  ;; 13
+
+    ;; Test 6: if without else — filter even numbers
+    (printf "--- test 6: filter evens ---\n")
+    (let g6 (make-generator
+              (let i 0)
+              (while (< i 10)
+                (if (== (% i 2) 0)
+                  (yield i))
+                (set! i (+ i 1)))))
+    (printf "%lld\n" (g6))   ;; 0
+    (printf "%lld\n" (g6))   ;; 2
+    (printf "%lld\n" (g6))   ;; 4
+    (printf "%lld\n" (g6))   ;; 6
+    (printf "%lld\n" (g6))   ;; 8
+    (printf "%lld\n" (g6))   ;; -1
+
+    ;; Test 7: code after while loop
+    (printf "--- test 7: yield after while ---\n")
+    (let g7 (make-generator
+              (let i 0)
+              (while (< i 3)
+                (yield i)
+                (set! i (+ i 1)))
+              (yield 99)))
+    (printf "%lld\n" (g7))   ;; 0
+    (printf "%lld\n" (g7))   ;; 1
+    (printf "%lld\n" (g7))   ;; 2
+    (printf "%lld\n" (g7))   ;; 99
+    (printf "%lld\n" (g7))   ;; -1
+
+    ;; Test 8: for macro (expands to while) with yield
+    (printf "--- test 8: for macro ---\n")
+    (let g8 (make-generator
+              (for i in 5
+                (yield i))))
+    (printf "%lld\n" (g8))   ;; 0
+    (printf "%lld\n" (g8))   ;; 1
+    (printf "%lld\n" (g8))   ;; 2
+    (printf "%lld\n" (g8))   ;; 3
+    (printf "%lld\n" (g8))   ;; 4
+    (printf "%lld\n" (g8))   ;; -1
+
+    ;; Test 9: break inside while
+    (printf "--- test 9: break ---\n")
+    (let g9 (make-generator
+              (let i 0)
+              (while 1
+                (if (== i 5) (break))
+                (yield i)
+                (set! i (+ i 1)))
+              (yield 99)))
+    (printf "%lld\n" (g9))   ;; 0
+    (printf "%lld\n" (g9))   ;; 1
+    (printf "%lld\n" (g9))   ;; 2
+    (printf "%lld\n" (g9))   ;; 3
+    (printf "%lld\n" (g9))   ;; 4
+    (printf "%lld\n" (g9))   ;; 99  (after loop)
+    (printf "%lld\n" (g9))   ;; -1
+
+    ;; Test 10: continue inside while (skip odd)
+    (printf "--- test 10: continue ---\n")
+    (let g10 (make-generator
+               (let i 0)
+               (while (< i 10)
+                 (set! i (+ i 1))
+                 (if (== (% i 2) 1) (continue))
+                 (yield i))))
+    (printf "%lld\n" (g10))  ;; 2
+    (printf "%lld\n" (g10))  ;; 4
+    (printf "%lld\n" (g10))  ;; 6
+    (printf "%lld\n" (g10))  ;; 8
+    (printf "%lld\n" (g10))  ;; 10
+    (printf "%lld\n" (g10))  ;; -1
+
+    (return 0)))
