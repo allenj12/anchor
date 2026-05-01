@@ -26,8 +26,7 @@
       (if (> a b)
         (do
           (set! arr (* j 8) b)
-          (set! arr (* (+ j 1) 8) a))
-        (do)))))
+          (set! arr (* (+ j 1) 8) a))))))
 
 (with-arena
   (fn main ()

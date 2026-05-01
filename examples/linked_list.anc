@@ -47,8 +47,7 @@
     (printf "%d" (cast int (car cur)))
     (set! cur (cdr cur))
     (if (! (null? cur))
-      (printf " ")
-      (do)))
+      (printf " ")))
   (printf ")"))
 
 ; Reverse a list — builds new list in caller's arena
@@ -68,8 +67,7 @@
   (while (! (null? cur))
     (let v (car cur))
     (if (== (% v 2) 0)
-      (set! acc (cons v acc))
-      (do))
+      (set! acc (cons v acc)))
     (set! cur (cdr cur)))
   (return (list-reverse acc)))
 
