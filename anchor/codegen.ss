@@ -537,8 +537,18 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
           => (lambda (p)
                (unless (fx= (length args) 2)
                  (anchor-error (symbol->string (id-sym h)) "requires exactly 2 arguments"))
-               (string-append "(AnchorVal)(!!" (emit-expr (car args) ctx pre)
-                              " " (cdr p) " !!" (emit-expr (cadr args) ctx pre) ")"))]
+               (let* ([right-pre (make-pre)]
+                      [right-val (emit-expr (cadr args) ctx right-pre)]
+                      [right-has-pre (not (null? (car right-pre)))]
+                      [right-expr
+                       (if right-has-pre
+                           (apply string-append "({ "
+                                  (append (map (lambda (s) (string-append s "\n"))
+                                               (pre-list right-pre))
+                                          (list "(AnchorVal)!!" right-val "; })")))
+                           (string-append "!!" right-val))])
+                 (string-append "(AnchorVal)(!!" (emit-expr (car args) ctx pre)
+                                " " (cdr p) " " right-expr ")")))]
 
          [(eq? h '!)
           (unless (fx= (length args) 1) (anchor-error "! requires 1 argument"))
