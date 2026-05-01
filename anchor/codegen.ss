@@ -962,8 +962,11 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
          ;; Use the registered C name so macro-introduced and user fns both resolve correctly.
          [(eq? h 'fn-ptr)
           (unless (fx= (length args) 1) (anchor-error "fn-ptr: (fn-ptr name)"))
-          (let* ([sym (id-sym (car args))]
-                 [cn  (or (hashtable-ref (ctx-fns ctx) sym #f) (c-ident (car args)))])
+          (let* ([cid (string->symbol (c-ident (car args)))]
+                 [sym (id-sym (car args))]
+                 [cn  (or (hashtable-ref (ctx-fns ctx) cid #f)
+                          (hashtable-ref (ctx-fns ctx) sym #f)
+                          (c-ident (car args)))])
             (string-append "anchor_ext((void*)" cn ")"))]
 
          ;; call-ptr: call through a function pointer stored in an AnchorVal.
@@ -1652,6 +1655,7 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
          [name   (car sig)] [params (cadr sig)] [body (caddr sig)]
          [cn     (c-ident name)]
          [_      (hashtable-set! (ctx-fns ctx) (id-sym name) cn)]
+         [_      (hashtable-set! (ctx-fns ctx) (string->symbol cn) cn)]
          [ret    (if (eq? (id-sym name) 'main) "int" "AnchorVal")]
          [main2? (and (eq? (id-sym name) 'main) (fx= (length params) 2))]
          [c-params
