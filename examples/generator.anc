@@ -2,29 +2,45 @@
 (ffi printf (const char* ...) -> int)
 
 ;; ---------------------------------------------------------------------------
-;; make-generator v2: supports yield inside while loops and if/else.
+;; coroutine: core state-machine macro.
 ;;
-;; Uses local-expand to see the fully expanded body, then:
-;;   1. Collects all let bindings → persists them in a state struct
-;;   2. Recursively compiles the AST into numbered states
-;;   3. Wraps in a closure with a dispatch-loop (while + if-chain)
+;; (coroutine mode input-name (params...) body...)
 ;;
-;; State machine transitions:
+;;   mode       = iter | async  (symbol — checked via id-sym)
+;;   input-name = identifier for the resume value (ignored in iter mode)
+;;   params     = () | (p1 p2 ...) — initial arguments
+;;   body       = code with (yield expr)
+;;
+;; iter mode:  closure takes no args, yield is fire-and-forget
+;; async mode: closure takes input-name arg, available after each resume
+;;
+;; If params are non-empty, returns a factory function:
+;;   (factory p1 p2) → closure
+;; If params are empty, returns the closure directly.
+;;
+;; State machine internals:
+;;   - Slot 0 of state struct = current state index
+;;   - Slots 1..N = persistent variables (params + let-bound vars)
 ;;   - yield: save vars, set next state, return value
 ;;   - while: check-state branches to body or exit
 ;;   - if/else: check-state branches to then or else
-;;   - batch (non-yield code): execute, transition to next state
+;;   - break/continue: rewritten to state transitions + C continue
+;;   - dispatch: nested if/else chain (handles backward jumps)
 ;; ---------------------------------------------------------------------------
 
-(define-syntax make-generator
+(define-syntax coroutine
   (macro-case ()
-    [(_ body ...)
-     (let* ([expanded (local-expand `(do ,@body))]
+    [(_ mode input-name params body ...)
+     (let* ([has-input (eq? (id-sym mode) 'async)]
+            [param-names (if (pair? params) params '())]
+
+            ;; Expand body so we see through user macros
+            [expanded (local-expand `(do ,@body))]
             [stmts (if (and (pair? expanded) (eq? (id-sym (car expanded)) 'do))
                        (cdr expanded)
                        (list expanded))]
 
-            ;; --- has-yield? : does a form contain (yield ...)? ---
+            ;; --- has-yield? ---
             [has-yield?
              (let ([hy #f])
                (set! hy (lambda (form)
@@ -39,7 +55,7 @@
                              [else (check (cdr xs))]))])))
                hy)]
 
-            ;; --- Collect all let-bound variable names (recursive) ---
+            ;; --- Collect let-bound variable names from body ---
             [collect-vars
              (let ([cv #f])
                (set! cv (lambda (forms)
@@ -53,14 +69,15 @@
                                [(memq tag '(fn lambda yield)) (cv rest)]
                                [(eq? tag 'let)
                                 (cons (cadr form) (append (cv (cddr form)) (cv rest)))]
-                               [(memq tag '(do while if))
+                               [(memq tag '(do block while if))
                                 (append (cv (cdr form)) (cv rest))]
                                [else (cv rest)])))))))
                cv)]
 
-            ;; --- Deduplicate by symbol name ---
-            [var-names
-             (let dedup ([vs (collect-vars stmts)] [seen '()] [acc '()])
+            ;; --- Merge params + body vars, deduplicate ---
+            [all-var-names
+             (let dedup ([vs (append param-names (collect-vars stmts))]
+                         [seen '()] [acc '()])
                (if (null? vs)
                    (reverse acc)
                    (if (memq (id-sym (car vs)) seen)
@@ -70,10 +87,17 @@
 
             ;; --- var-info: ((name offset) ...) ---
             [var-info
-             (let loop ([vs var-names] [off 8] [acc '()])
+             (let loop ([vs all-var-names] [off 8] [acc '()])
                (if (null? vs) (reverse acc)
                    (loop (cdr vs) (+ off 8)
                          (cons (list (car vs) off) acc))))]
+
+            ;; --- param-info: first N entries of var-info (for factory init) ---
+            [n-params (length param-names)]
+            [param-info
+             (let loop ([vis var-info] [n n-params] [acc '()])
+               (if (or (= n 0) (null? vis)) (reverse acc)
+                   (loop (cdr vis) (- n 1) (cons (car vis) acc))))]
 
             [n-vars (length var-info)]
             [struct-size (* (+ 1 n-vars) 8)]
@@ -112,10 +136,7 @@
                    [else (map rw form)])))
                rw)]
 
-            ;; --- Rewrite break/continue → state transitions for while-with-yields ---
-            ;; Stops at nested while/fn/lambda boundaries.
-            ;; break  → save vars, set state to after-loop, C continue (re-dispatch)
-            ;; continue → save vars, set state to check, C continue (re-dispatch)
+            ;; --- Rewrite break/continue → state transitions ---
             [rewrite-bc
              (let ([rbc #f])
                (set! rbc (lambda (form break-target cont-target)
@@ -129,7 +150,7 @@
                    [else (map (lambda (x) (rbc x break-target cont-target)) form)])))
                rbc)]
 
-            ;; --- Chunk a list of stmts into (batch ...) and (complex form) ---
+            ;; --- Chunk stmts into (batch ...) and (complex form) ---
             [chunk
              (lambda (ss)
                (let loop ([ss ss] [batch '()] [result '()])
@@ -153,8 +174,6 @@
 
             [_setup
              (begin
-               ;; compile: form × next-state × counter → (entry counter states)
-               ;; Each state is (idx code-form).
                (set! compile
                  (lambda (form next counter)
                    (let ([tag (id-sym (car form))])
@@ -170,8 +189,8 @@
                                          (set! _gs 0 ,next)
                                          (return ,(rewrite-lets (cadr form))))))))]
 
-                       ;; ---- (do stmts...) ----
-                       [(eq? tag 'do)
+                       ;; ---- (do stmts...) / (block stmts...) ----
+                       [(memq tag '(do block))
                         (compile-seq (cdr form) next counter)]
 
                        ;; ---- (while cond body...) with yields ----
@@ -179,9 +198,7 @@
                         (let* ([cond-expr (cadr form)]
                                [wbody (cddr form)]
                                [check-idx counter]
-                               ;; rewrite break/continue before compiling body
                                [rwbody (map (lambda (s) (rewrite-bc s next check-idx)) wbody)]
-                               ;; body loops back to check
                                [body-result (compile-seq rwbody check-idx (+ counter 1))]
                                [body-entry (car body-result)]
                                [body-ctr (cadr body-result)]
@@ -224,7 +241,6 @@
                        ;; fallback
                        [else (list next counter '())]))))
 
-               ;; compile-seq: stmt-list × next × counter → (entry counter states)
                (set! compile-seq
                  (lambda (stmts next counter)
                    (let* ([chunks (chunk stmts)])
@@ -233,7 +249,6 @@
                            (list cont ctr acc)
                            (let ([c (car cs)])
                              (if (eq? (car c) 'batch)
-                                 ;; non-yield batch
                                  (let* ([batch-stmts (cdr c)]
                                         [idx ctr]
                                         [state (list idx
@@ -242,7 +257,6 @@
                                                       ,@(gen-saves)
                                                       (set! _gs 0 ,cont)))])
                                    (loop (cdr cs) idx (+ ctr 1) (cons state acc)))
-                                 ;; complex yield-containing form
                                  (let* ([form (cadr c)]
                                         [result (compile form cont ctr)]
                                         [entry (car result)]
@@ -257,34 +271,80 @@
             [entry-state (car result)]
             [all-states (caddr result)]
 
-            ;; --- Generate nested if/else dispatch ---
-            ;; Only one state fires per while iteration; backward jumps
-            ;; loop correctly via the outer while.
+            ;; --- Nested if/else dispatch ---
             [dispatch
              (let fold ([ss all-states])
                (if (null? ss)
                    '(return -1)
                    `(if (== (get _gs 0) ,(caar ss))
                       ,(cadar ss)
-                      ,(fold (cdr ss)))))])
+                      ,(fold (cdr ss)))))]
 
-       ;; Output: alloc state struct, init state, return closure
-       `(do (let _gs (alloc ,struct-size))
-            (set! _gs 0 ,entry-state)
-            (lambda ((_gs) ())
-              (while 1
-                ,dispatch))))]))
+            ;; --- Closure param list ---
+            [closure-params (if has-input (list input-name) '())]
+
+            ;; --- Build output ---
+            [inner-closure
+             `(lambda ((_gs) ,closure-params)
+                (while 1
+                  ,dispatch))])
+
+       ;; If params: factory function. Otherwise: direct closure.
+       (if (null? param-names)
+           `(do (let _gs (alloc ,struct-size))
+                (set! _gs 0 ,entry-state)
+                ,inner-closure)
+           `(lambda (() ,param-names)
+              (let _gs (alloc ,struct-size))
+              (set! _gs 0 ,entry-state)
+              ,@(map (lambda (pi) `(set! _gs ,(cadr pi) ,(car pi)))
+                     param-info)
+              (return ,inner-closure))))]))
 
 ;; ---------------------------------------------------------------------------
-;; for: expands to a while loop — tests that local-expand sees through it
+;; make-generator: iterator — no input, optional params
+;; ---------------------------------------------------------------------------
+(define-syntax make-generator
+  (syntax-rules ()
+    [(_ () body ...)
+     (coroutine iter _x () body ...)]
+    [(_ (p ...) body ...)
+     (coroutine iter _x (p ...) body ...)]))
+
+;; ---------------------------------------------------------------------------
+;; make-async: coroutine with resume input, optional params
+;; ---------------------------------------------------------------------------
+(define-syntax make-async
+  (syntax-rules ()
+    [(_ (input-name) () body ...)
+     (coroutine async input-name () body ...)]
+    [(_ (input-name) (p ...) body ...)
+     (coroutine async input-name (p ...) body ...)]))
+
+;; ---------------------------------------------------------------------------
+;; for: deep-walking loop with correct continue semantics
 ;; ---------------------------------------------------------------------------
 (define-syntax for
-  (syntax-rules (in)
+  (macro-case ()
     [(_ i in limit body ...)
-     (do (let i 0)
-         (while (< i limit)
-           body ...
-           (set! i (+ i 1))))]))
+     (let* ([expanded (local-expand `(do ,@body))]
+            [stmts (if (and (pair? expanded) (eq? (id-sym (car expanded)) 'do))
+                       (cdr expanded)
+                       (list expanded))]
+            [incr `(set! ,i (+ ,i 1))]
+            [walked (map (lambda (s)
+                           (let walk ([form s])
+                             (cond
+                               [(not (pair? form)) form]
+                               [(memq (id-sym (car form)) '(fn lambda while)) form]
+                               [(eq? (id-sym (car form)) 'continue)
+                                `(do ,incr (continue))]
+                               [else (map walk form)])))
+                         stmts)])
+       `(block (let ,i 0)
+              (while (< ,i ,limit)
+                ,@walked
+                ,incr)))]))
 
 ;; ---------------------------------------------------------------------------
 ;; Tests
@@ -293,9 +353,9 @@
 (with-arena
   (fn main ()
 
-    ;; Test 1: simple yields (regression — no loops/ifs)
+    ;; Test 1: basic generator — no params
     (printf "--- test 1: simple ---\n")
-    (let g1 (make-generator
+    (let g1 (make-generator ()
               (yield 10)
               (yield 20)
               (yield 30)))
@@ -304,9 +364,9 @@
     (printf "%lld\n" (g1))   ;; 30
     (printf "%lld\n" (g1))   ;; -1
 
-    ;; Test 2: counter with variable persistence (regression)
+    ;; Test 2: counter with variable persistence
     (printf "--- test 2: counter ---\n")
-    (let g2 (make-generator
+    (let g2 (make-generator ()
               (let i 0)
               (yield i)
               (set! i (+ i 1))
@@ -320,7 +380,7 @@
 
     ;; Test 3: while loop
     (printf "--- test 3: while ---\n")
-    (let g3 (make-generator
+    (let g3 (make-generator ()
               (let i 0)
               (while (< i 5)
                 (yield i)
@@ -334,7 +394,7 @@
 
     ;; Test 4: if/else with yields
     (printf "--- test 4: if/else ---\n")
-    (let g4 (make-generator
+    (let g4 (make-generator ()
               (let x 10)
               (if (> x 5)
                 (yield 1)
@@ -346,7 +406,7 @@
 
     ;; Test 5: fibonacci with while loop
     (printf "--- test 5: fibonacci ---\n")
-    (let fib (make-generator
+    (let fib (make-generator ()
                (let a 0)
                (let b 1)
                (while 1
@@ -365,7 +425,7 @@
 
     ;; Test 6: if without else — filter even numbers
     (printf "--- test 6: filter evens ---\n")
-    (let g6 (make-generator
+    (let g6 (make-generator ()
               (let i 0)
               (while (< i 10)
                 (if (== (% i 2) 0)
@@ -380,7 +440,7 @@
 
     ;; Test 7: code after while loop
     (printf "--- test 7: yield after while ---\n")
-    (let g7 (make-generator
+    (let g7 (make-generator ()
               (let i 0)
               (while (< i 3)
                 (yield i)
@@ -394,7 +454,7 @@
 
     ;; Test 8: for macro (expands to while) with yield
     (printf "--- test 8: for macro ---\n")
-    (let g8 (make-generator
+    (let g8 (make-generator ()
               (for i in 5
                 (yield i))))
     (printf "%lld\n" (g8))   ;; 0
@@ -406,7 +466,7 @@
 
     ;; Test 9: break inside while
     (printf "--- test 9: break ---\n")
-    (let g9 (make-generator
+    (let g9 (make-generator ()
               (let i 0)
               (while 1
                 (if (== i 5) (break))
@@ -423,7 +483,7 @@
 
     ;; Test 10: continue inside while (skip odd)
     (printf "--- test 10: continue ---\n")
-    (let g10 (make-generator
+    (let g10 (make-generator ()
                (let i 0)
                (while (< i 10)
                  (set! i (+ i 1))
@@ -435,5 +495,95 @@
     (printf "%lld\n" (g10))  ;; 8
     (printf "%lld\n" (g10))  ;; 10
     (printf "%lld\n" (g10))  ;; -1
+
+    ;; Test 11: parameterized range generator
+    (printf "--- test 11: range(lo, hi) ---\n")
+    (let range (make-generator (lo hi)
+                 (let i lo)
+                 (while (< i hi)
+                   (yield i)
+                   (set! i (+ i 1)))))
+    (let r1 (range 3 8))
+    (printf "%lld\n" (r1))   ;; 3
+    (printf "%lld\n" (r1))   ;; 4
+    (printf "%lld\n" (r1))   ;; 5
+    (printf "%lld\n" (r1))   ;; 6
+    (printf "%lld\n" (r1))   ;; 7
+    (printf "%lld\n" (r1))   ;; -1
+
+    ;; Test 12: two instances from same factory
+    (printf "--- test 12: two instances ---\n")
+    (let range2 (make-generator (lo hi)
+                  (let i lo)
+                  (while (< i hi)
+                    (yield i)
+                    (set! i (+ i 1)))))
+    (let a (range2 0 3))
+    (let b (range2 10 13))
+    (printf "a=%lld b=%lld\n" (a) (b))   ;; a=0 b=10
+    (printf "a=%lld b=%lld\n" (a) (b))   ;; a=1 b=11
+    (printf "a=%lld b=%lld\n" (a) (b))   ;; a=2 b=12
+    (printf "a=%lld b=%lld\n" (a) (b))   ;; a=-1 b=-1
+
+    ;; Test 13: parameterized fibonacci (n terms)
+    (printf "--- test 13: fib(n) ---\n")
+    (let make-fib (make-generator (n)
+                    (let a 0)
+                    (let b 1)
+                    (let count 0)
+                    (while (< count n)
+                      (yield a)
+                      (let t (+ a b))
+                      (set! a b)
+                      (set! b t)
+                      (set! count (+ count 1)))))
+    (let f (make-fib 8))
+    (printf "%lld\n" (f))    ;; 0
+    (printf "%lld\n" (f))    ;; 1
+    (printf "%lld\n" (f))    ;; 1
+    (printf "%lld\n" (f))    ;; 2
+    (printf "%lld\n" (f))    ;; 3
+    (printf "%lld\n" (f))    ;; 5
+    (printf "%lld\n" (f))    ;; 8
+    (printf "%lld\n" (f))    ;; 13
+    (printf "%lld\n" (f))    ;; -1
+
+    ;; Test 14: for in generator with squares
+    (printf "--- test 14: for in generator ---\n")
+    (let g14 (make-generator ()
+               (for i in 5
+                 (yield (* i i)))))
+    (printf "%lld\n" (g14))  ;; 0
+    (printf "%lld\n" (g14))  ;; 1
+    (printf "%lld\n" (g14))  ;; 4
+    (printf "%lld\n" (g14))  ;; 9
+    (printf "%lld\n" (g14))  ;; 16
+    (printf "%lld\n" (g14))  ;; -1
+
+    ;; Test 15: make-async — resume with input
+    (printf "--- test 15: async basic ---\n")
+    (let g15 (make-async (reply) ()
+               (yield 1)
+               (printf "got: %lld\n" reply)
+               (yield 2)
+               (printf "got: %lld\n" reply)
+               (yield 3)))
+    (printf "req: %lld\n" (g15 0))    ;; req: 1  (first call, reply=0 unused)
+    (printf "req: %lld\n" (g15 42))   ;; got: 42, req: 2
+    (printf "req: %lld\n" (g15 99))   ;; got: 99, req: 3
+    (printf "req: %lld\n" (g15 0))    ;; req: -1
+
+    ;; Test 16: make-async with params — accumulator
+    (printf "--- test 16: async accumulator ---\n")
+    (let make-accum (make-async (val) (start)
+                      (let sum start)
+                      (while 1
+                        (yield sum)
+                        (set! sum (+ sum val)))))
+    (let acc (make-accum 100))
+    (printf "%lld\n" (acc 0))    ;; 100 (initial sum, val=0 ignored)
+    (printf "%lld\n" (acc 5))    ;; 105
+    (printf "%lld\n" (acc 10))   ;; 115
+    (printf "%lld\n" (acc 1))    ;; 116
 
     (return 0)))

@@ -1076,7 +1076,9 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
     [(sym? node) (string-append "(size_t)_ANCH_IVAL(" (c-ident node) ")")]
     [else
      (let ([pre (make-pre)])
-       (string-append "(size_t)_ANCH_IVAL(" (emit-expr node ctx pre) ")"))]))
+       (let ([e (emit-expr node ctx pre)])
+         (pre-emit! pre ctx)
+         (string-append "(size_t)_ANCH_IVAL(" e ")")))]))
 
 (define (wrap-extern-ret call ret ctx pre)
   (if (string=? ret "void")
