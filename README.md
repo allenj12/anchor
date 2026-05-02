@@ -1013,6 +1013,47 @@ get a handle carrying the call-site marks:
 `it` inside `then` refers to the macro-introduced binding, not any outer `it`.
 The `block` scope means any outer `it` is simply shadowed, not renamed.
 
+### Local helpers in `macro-case`
+
+Place `(define name body)` forms after the literals list and before the first
+pattern clause. They become internal definitions scoped to that macro — shared
+across all branches, invisible outside.
+
+```anchor
+(define-syntax for
+  (macro-case (to)
+    (define walk-continue
+      (lambda (stmts incr)
+        (map (lambda (s)
+               (let walk ([form s])
+                 (cond
+                   [(not (pair? form)) form]
+                   [(memq (id-sym (car form)) '(fn lambda while)) form]
+                   [(eq? (id-sym (car form)) 'continue)
+                    `(do ,incr (continue))]
+                   [else (map walk form)])))
+             stmts)))
+    (define expand-body
+      (lambda (body)
+        (let ([expanded (local-expand `(do ,@body))])
+          (if (and (pair? expanded) (eq? (id-sym (car expanded)) 'do))
+              (cdr expanded)
+              (list expanded)))))
+    [(_ i to limit body ...)
+     (let* ([incr `(set! ,i (+ ,i 1))]
+            [stmts (expand-body body)]
+            [walked (walk-continue stmts incr)])
+       `(block (let ,i 0)
+              (while (< ,i ,limit)
+                ,@walked
+                ,incr)))]))
+```
+
+Local helpers have access to the same functions as `macro-case` templates:
+`id-sym`, `anchor-error`, `anchor-gensym`, `datum->syntax`, `is-struct?`,
+`local-expand`, `filter-map`, and syntax record accessors (`stx?`, `stx-sym`,
+`stx-marks`, `stx-src`, `make-stx`).
+
 ---
 
 ## Examples
