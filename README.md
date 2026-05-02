@@ -21,6 +21,41 @@ Requires [Chez Scheme](https://cisco.github.io/ChezScheme/).
 chez --script build.ss   # → ./anchorc  (standalone binary, no Chez needed to run)
 ```
 
+### Windows
+
+The Chez Scheme Windows installer puts `scheme.exe` and `csv1030.dll` in
+`C:\Program Files\Chez Scheme 10.3.0\bin\a6nt\`. Both that directory and the
+directory where you install `anchorc.exe` must be on your `PATH`.
+
+```powershell
+# add once (run as Administrator, then restart your terminal)
+[System.Environment]::SetEnvironmentVariable(
+    "PATH",
+    "C:\Program Files\Chez Scheme 10.3.0\bin\a6nt;" +
+        [System.Environment]::GetEnvironmentVariable("PATH","Machine"),
+    "Machine"
+)
+
+scheme --script build.ss   # note: 'scheme', not 'chez'  → anchorc.exe
+```
+
+For programs that link against external C libraries, install
+[MSYS2](https://www.msys2.org/) and add `C:\msys64\mingw64\bin` to your `PATH`
+as well. Pass include/lib paths via `--cflags`:
+
+```powershell
+anchorc main.anc -o main --cflags "-IC:/msys64/mingw64/include -LC:/msys64/mingw64/lib -lsomelib"
+```
+
+**Stack size.** Windows defaults to a 1 MB thread stack. Each `with-arena` scope
+allocates a 1 MB buffer on the stack, so programs with more than one nested
+arena scope will overflow immediately. Add `-Wl,--stack,16777216` to `--cflags`
+to raise the limit to 16 MB:
+
+```powershell
+anchorc main.anc -o main --cflags "-Wl,--stack,16777216"
+```
+
 Run a file:
 
 ```bash

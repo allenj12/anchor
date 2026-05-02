@@ -1,5 +1,6 @@
 # Compiled binary
 anchorc
+anchorc.exe
 
 # Chez Scheme build artifacts
 anchorc.so

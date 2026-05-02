@@ -5,7 +5,11 @@
 #include "anchorc_boot.h"
 
 int main(int argc, const char *argv[]) {
+#ifdef _WIN32
+    _putenv_s("_ANCHORC_ARGV0", argv[0]);
+#else
     setenv("_ANCHORC_ARGV0", argv[0], 1);
+#endif
 
     Sscheme_init(NULL);
 

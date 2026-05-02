@@ -44,9 +44,9 @@
 
 (boot->cheader "anchorc.boot" "anchorc_boot.h" "anchorc_boot")
 
+(define-values (v-major v-minor v-bug) (scheme-version-number))
 (define version
-  (let-values ([(major minor bug) (scheme-version-number)])
-    (string-append (number->string major) "." (number->string minor) "." (number->string bug))))
+  (string-append (number->string v-major) "." (number->string v-minor) "." (number->string v-bug)))
 
 (define m-type (symbol->string (machine-type)))
 
@@ -54,7 +54,9 @@
   (find file-exists?
         (list (format "/opt/homebrew/Cellar/chezscheme/~a/lib/csv~a/~a" version version m-type)
               (format "/usr/lib/csv~a/~a" version m-type)
-              (format "/usr/local/lib/csv~a/~a" version m-type))))
+              (format "/usr/local/lib/csv~a/~a" version m-type)
+              ;; Windows: boot/<machine-type>/ holds scheme.h and petite.boot
+              (format "C:/Program Files/Chez Scheme ~a/boot/~a" version m-type))))
 
 (unless lib-dir
   (display "could not find Chez Scheme installation\n") (exit 1))
@@ -71,16 +73,25 @@
           (member (substring m-type (fx- (string-length m-type) 2) (string-length m-type))
                   '("ob" "nb" "fb")))
      'bsd]
+    [(and (fx>= (string-length m-type) 2)
+          (string=? "nt" (substring m-type (fx- (string-length m-type) 2) (string-length m-type))))
+     'windows]
     [else 'linux]))
 
-(let ([gcc-libs
-       (case os
-         [osx "-L/opt/homebrew/lib -lz -llz4 -liconv -lncurses -lpthread -ldl -lm -framework CoreFoundation -framework CoreServices"]
-         [bsd "-L/usr/local/lib -lz -llz4 -liconv -lpthread -lm"]
-         [linux "-lz -llz4 -lncurses -lpthread -ldl -lm -lrt"]
-         [else (display "unsupported os\n") (exit 1)])])
-  (system
-    (format "gcc -O3 anchorc_main.c -rdynamic ~a/libkernel.a -I~a ~a -o anchorc"
-            lib-dir lib-dir gcc-libs)))
+(if (eq? os 'windows)
+    ;; Windows: link against csv<ver>.lib (import lib for csv<ver>.dll) from bin/<machine-type>/
+    (let* ([bin-dir  (format "C:/Program Files/Chez Scheme ~a/bin/~a" version m-type)]
+           [lib-name (format "csv~a~a~a.lib" v-major v-minor v-bug)])
+      (system (format "gcc -O3 -static-libgcc anchorc_main.c -I\"~a\" -L\"~a\" -l:~a -o anchorc.exe"
+                      lib-dir bin-dir lib-name)))
+    (let ([gcc-libs
+           (case os
+             [osx "-L/opt/homebrew/lib -lz -llz4 -liconv -lncurses -lpthread -ldl -lm -framework CoreFoundation -framework CoreServices"]
+             [bsd "-L/usr/local/lib -lz -llz4 -liconv -lpthread -lm"]
+             [linux "-lz -llz4 -lncurses -lpthread -ldl -lm -lrt"]
+             [else (display "unsupported os\n") (exit 1)])])
+      (system
+        (format "gcc -O3 anchorc_main.c -rdynamic ~a/libkernel.a -I~a ~a -o anchorc"
+                lib-dir lib-dir gcc-libs))))
 
-(display "build complete: compiler/anchorc\n")
+(display (string-append "build complete: " (if (eq? os 'windows) "anchorc.exe" "anchorc") "\n"))
