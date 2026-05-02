@@ -269,3 +269,35 @@
     (do (memcpy (ref r) s slen)
         (return r))
     (return r)))
+
+(define-syntax when
+  (syntax-rules ()
+    [(_ test body ...)
+     (if test (do body ...))]))
+
+(define-syntax unless
+  (syntax-rules ()
+    [(_ test body ...)
+     (if (! test) (do body ...))]))
+
+;; ---------------------------------------------------------------------------
+;; cond — multi-branch conditional with inline bindings
+;;
+;;   (cond [test body ...]       test+body: if test, run body
+;;         [(let x expr)]        single-form: execute statement, continue
+;;         [else body ...])      terminal else
+;;
+;; Single-form clauses introduce bindings (or any side effect) visible
+;; to all subsequent clauses.  No match and no else returns 0.
+;; ---------------------------------------------------------------------------
+
+(define-syntax cond
+  (macro-case (else)
+    [(_ (else body ...))
+     `(do ,@body)]
+    [(_ (form) rest ...)
+     `(do ,form (cond ,@rest))]
+    [(_ (test body ...) rest ...)
+     `(if ,test (do ,@body) (cond ,@rest))]
+    [(_)
+     `(do)]))

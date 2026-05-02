@@ -165,6 +165,24 @@ everything is freed on return. The default size is 1 MB.
 in `{ }` so `let` bindings inside don't escape. `break` and `continue` work exactly
 as in C — they apply to the innermost enclosing `while`.
 
+`when` and `unless` are one-armed conditionals:
+
+```anchor
+(when (< x 10) (printf "small\n"))
+(unless (> x 10) (printf "not large\n"))
+```
+
+`cond` chains tests with an optional `else`. Single-form clauses execute as
+statements (useful for inline bindings):
+
+```anchor
+(cond
+  [(< x 0)  (printf "negative\n")]
+  [(let abs (- 0 x))]
+  [(< abs 10) (printf "small\n")]
+  [else (printf "big\n")])
+```
+
 ### Functions
 
 ```anchor
