@@ -18,7 +18,7 @@
          [dir  (path-parent path)]
          [dir  (if (string=? dir "") "." dir)])
     ;; Resolve to absolute path so -I flags work regardless of cwd
-    (if (and (> (string-length dir) 0) (char=? (string-ref dir 0) #\/))
+    (if (path-absolute? dir)
         dir
         (string-append (current-directory) "/" dir))))
 
@@ -109,7 +109,7 @@
               (string=? (substring s (fx- (string-length s) 4) (string-length s)) ".anc")))))
 
 (define (resolve-path base-dir rel)
-  (if (or (fx= (string-length rel) 0) (char=? (string-ref rel 0) #\/))
+  (if (or (fx= (string-length rel) 0) (path-absolute? rel))
       rel
       (string-append base-dir "/" rel)))
 
@@ -153,7 +153,7 @@
                    ".")]
          [dir  (path-parent path)]
          [dir  (if (string=? dir "") "." dir)])
-    (if (and (> (string-length dir) 0) (char=? (string-ref dir 0) #\/))
+    (if (path-absolute? dir)
         dir
         (if (string=? dir ".")
             (current-directory)
