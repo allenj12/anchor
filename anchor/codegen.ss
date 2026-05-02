@@ -950,16 +950,22 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
          ;; do as expression (last item is the value)
          [(eq? h 'do)
           (if (null? args) "anchor_int(0)"
-              (let ([tmp (ctx-tmp! ctx)]
-                    [n   (length args)])
-                (pre-add! pre (string-append "AnchorVal " tmp " = anchor_int(0);"))
-                (for-each (lambda (s) (emit-stmt-into s ctx pre))
-                          (list-head args (fx- n 1)))
-                (let* ([lp (make-pre)]
-                       [le (emit-expr (list-ref args (fx- n 1)) ctx lp)])
-                  (for-each (lambda (s) (pre-add! pre s)) (pre-list lp))
-                  (pre-add! pre (string-append tmp " = " le ";")))
-                tmp))]
+              (let* ([n      (length args)]
+                     [do-pre (make-pre)]
+                     [_stmts (for-each (lambda (s) (emit-stmt-into s ctx do-pre))
+                                       (list-head args (fx- n 1)))]
+                     [last-pre (make-pre)]
+                     [last-val (emit-expr (list-ref args (fx- n 1)) ctx last-pre)]
+                     [has-pre  (or (not (null? (car do-pre)))
+                                  (not (null? (car last-pre))))])
+                (if has-pre
+                    (apply string-append "({ "
+                           (append (map (lambda (s) (string-append s "\n"))
+                                        (pre-list do-pre))
+                                   (map (lambda (s) (string-append s "\n"))
+                                        (pre-list last-pre))
+                                   (list last-val "; })")))
+                    last-val)))]
 
          ;; fn-ptr: take the address of a named Anchor function as an AnchorVal.
          ;; Use the registered C name so macro-introduced and user fns both resolve correctly.
