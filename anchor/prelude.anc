@@ -46,14 +46,14 @@
     ;; sized read terminal: (get ptr off sz) — read sz bytes at offset
     [(_ ptr off sz)
      (and (not (is-struct? off)) (not (is-struct? sz)))
-     `(%sized-read (%ptr+ ,ptr ,off) ,sz)]
+     `(%sized-read (+ ,ptr ,off) ,sz)]
     ;; byte-offset + pointer follow: (get ptr off -> rest ...)
     [(_ ptr off -> rest ...)
-     `(get (%scalar (%ptr+ ,ptr ,off)) ,@rest)]
+     `(get (%scalar (+ ,ptr ,off)) ,@rest)]
     ;; byte-offset step: (get ptr off rest ...)
     [(_ ptr off rest ...)
      (not (is-struct? off))
-     `(get (%ptr+ ,ptr ,off) ,@rest)]
+     `(get (+ ,ptr ,off) ,@rest)]
     ;; bare pointer: scalar read
     [(_ ptr)
      `(%scalar ,ptr)]))
@@ -82,11 +82,11 @@
      `(aref (%addr-offset ,ptr ,S ,f) ,S2 ,@rest)]
     ;; byte-offset + pointer follow: (aref ptr off -> rest ...)
     [(_ ptr off -> rest ...)
-     `(aref (%scalar (%ptr+ ,ptr ,off)) ,@rest)]
+     `(aref (%scalar (+ ,ptr ,off)) ,@rest)]
     ;; byte-offset step: (aref ptr off rest ...)
     [(_ ptr off rest ...)
      (not (is-struct? off))
-     `(aref (%ptr+ ,ptr ,off) ,@rest)]
+     `(aref (+ ,ptr ,off) ,@rest)]
     ;; bare pointer: address is the pointer itself
     [(_ ptr)
      ptr]))
@@ -125,19 +125,19 @@
     ;; byte-offset + pointer follow: (set! ptr off -> rest ...)
     [(_ ptr off -> rest ...)
      (not (is-struct? off))
-     `(set! (%scalar (%ptr+ ,ptr ,off)) ,@rest)]
+     `(set! (%scalar (+ ,ptr ,off)) ,@rest)]
     ;; sized write terminal: (set! ptr off sz v) — write sz bytes at offset
     [(_ ptr off sz v)
      (and (not (is-struct? off)) (not (is-struct? sz)))
-     `(%sized-store (%ptr+ ,ptr ,off) ,sz ,v)]
+     `(%sized-store (+ ,ptr ,off) ,sz ,v)]
     ;; byte-offset terminal write: (set! ptr off v) — raw scalar store
     [(_ ptr off v)
      (not (is-struct? off))
-     `(%scalar-store (%ptr+ ,ptr ,off) ,v)]
+     `(%scalar-store (+ ,ptr ,off) ,v)]
     ;; byte-offset step: (set! ptr off rest ...) — navigate then continue
     [(_ ptr off rest ...)
      (not (is-struct? off))
-     `(set! (%ptr+ ,ptr ,off) ,@rest)]))
+     `(set! (+ ,ptr ,off) ,@rest)]))
 
 ;; ---------------------------------------------------------------------------
 ;; Linked list

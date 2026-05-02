@@ -19,7 +19,8 @@
 (define *special-forms*
   '(do block let set! if while return fn ffi include
     cast alloc ref deref with-arena struct
-    global global-set! extern-global const global-arena arena-reset! with-parent-arena
+    global const global-arena arena-reset! with-parent-arena
+    array array-of
     sizeof break continue fn-ptr call-ptr call-ptr-c fn-c
     define-syntax syntax-rules macro-case syntax with-syntax quasisyntax unsyntax unsyntax-splicing quote quasiquote unquote unquote-splicing
     embed-bytes embed-string

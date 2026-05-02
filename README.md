@@ -750,11 +750,12 @@ Fields can be any bit width — not just byte-aligned:
 
 ```anchor
 (global count 0)              ; mutable global AnchorVal
-(global-set! count (+ count 1))
+(set! count (+ count 1))
 
-(global buf (alloc (kb 64)))  ; static 64 KB buffer
+(global buf (array-of (kb 64)))  ; static 64 KB buffer
 
 (const max-size 4096)         ; immutable — compiler may fold it
+(const keys (array "Am" "F" "C" "G"))  ; static array of strings
 ```
 
 ### Linked lists
