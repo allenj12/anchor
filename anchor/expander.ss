@@ -558,18 +558,28 @@
                            ,(build-clause-chain form-var literals (cdr clauses)))
                       template)))))))
 
-(define (compile-syntax-case lits-form clauses)
+(define (compile-syntax-case lits-form forms)
   (unless (list? lits-form)
     (anchor-error "syntax-case: literals must be a list"))
-  ;; In compiled-binary mode, top-level defines are not in the interaction
-  ;; environment that eval uses.  Pass all expander helpers the template might
-  ;; call as outer lambda parameters so they are closed over lexically rather
-  ;; than looked up by name at runtime.
-  ((eval `(lambda (match-pattern anchor-error anchor-error/loc id-sym anchor-gensym instantiate instantiate-quasi datum->syntax is-struct? filter-map local-expand)
-            (lambda (_form)
-              ,(build-clause-chain '_form lits-form clauses))))
-   match-pattern anchor-error anchor-error/loc id-sym anchor-gensym instantiate instantiate-quasi anc-datum->syntax
-   anchor-is-struct? filter-map local-expand))
+  ;; Partition leading (define name body) forms from pattern clauses.
+  ;; Defines go before the first clause that starts with a list (the pattern).
+  (let-values ([(defs clauses)
+                (let split ([fs forms] [ds '()])
+                  (if (or (null? fs)
+                          (not (pair? (car fs)))
+                          (not (eq? (caar fs) 'define)))
+                      (values (reverse ds) fs)
+                      (split (cdr fs) (cons (car fs) ds))))])
+    ;; In compiled-binary mode, top-level defines are not in the interaction
+    ;; environment that eval uses.  Pass all expander helpers the template might
+    ;; call as outer lambda parameters so they are closed over lexically rather
+    ;; than looked up by name at runtime.
+    ((eval `(lambda (match-pattern anchor-error anchor-error/loc id-sym anchor-gensym instantiate instantiate-quasi datum->syntax is-struct? filter-map local-expand stx? stx-sym stx-marks stx-src make-stx)
+              (lambda (_form)
+                ,@(map (lambda (d) `(define ,(cadr d) ,(caddr d))) defs)
+                ,(build-clause-chain '_form lits-form clauses))))
+     match-pattern anchor-error anchor-error/loc id-sym anchor-gensym instantiate instantiate-quasi anc-datum->syntax
+     anchor-is-struct? filter-map local-expand stx? stx-sym stx-marks stx-src make-stx)))
 
 ;; Identity helpers available in transformer bodies — Anchor AST is plain data.
 (define (anc-syntax->datum stx) stx)

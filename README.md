@@ -170,6 +170,24 @@ everything is freed on return. The default size is 1 MB.
 in `{ }` so `let` bindings inside don't escape. `break` and `continue` work exactly
 as in C — they apply to the innermost enclosing `while`.
 
+`when` and `unless` are one-armed conditionals:
+
+```anchor
+(when (< x 10) (printf "small\n"))
+(unless (> x 10) (printf "not large\n"))
+```
+
+`cond` chains tests with an optional `else`. Single-form clauses execute as
+statements (useful for inline bindings):
+
+```anchor
+(cond
+  [(< x 0)  (printf "negative\n")]
+  [(let abs (- 0 x))]
+  [(< abs 10) (printf "small\n")]
+  [else (printf "big\n")])
+```
+
 ### Functions
 
 ```anchor
@@ -822,6 +840,32 @@ level; `null?` simply tests whether the value is zero.
 (set-cdr! lst (cons 5 nil)) ; replace tail
 ```
 
+### For loops
+
+`for` is a unified loop macro with `range` and `each` forms. `continue` and `break` work correctly — the increment is auto-inserted before `continue`.
+
+```anchor
+;; range
+(for range (i 10) (printf "%lld " i))           ; 0 to 9
+(for range (i 3 8) (printf "%lld " i))           ; 3 to 7
+
+;; untyped array
+(for each (val arr len) (printf "%lld " val))
+(for each ((val i) arr len) (printf "%lld:%lld " i val))
+
+;; typed struct array
+(for each (Point p points count)
+  (printf "(%lld,%lld) " (get p Point x) (get p Point y)))
+(for each (Point (p i) points count)
+  (set! p Point x (* i 10)))
+
+;; cons list
+(for each (v lst ->) (printf "%lld " v))
+(for each ((v i) lst ->) (printf "%lld:%lld " i v))
+```
+
+Limits, lengths, and counts are evaluated once. Untyped array iteration uses an offset-bump pattern that keeps the base pointer loop-invariant, enabling SIMD auto-vectorization in the generated C.
+
 ### Symbols
 
 Symbols pack short strings (up to 7 bytes UTF-8) into a single `AnchorVal` integer.
@@ -1052,6 +1096,47 @@ get a handle carrying the call-site marks:
 
 `it` inside `then` refers to the macro-introduced binding, not any outer `it`.
 The `block` scope means any outer `it` is simply shadowed, not renamed.
+
+### Local helpers in `macro-case`
+
+Place `(define name body)` forms after the literals list and before the first
+pattern clause. They become internal definitions scoped to that macro — shared
+across all branches, invisible outside.
+
+```anchor
+(define-syntax for
+  (macro-case (to)
+    (define walk-continue
+      (lambda (stmts incr)
+        (map (lambda (s)
+               (let walk ([form s])
+                 (cond
+                   [(not (pair? form)) form]
+                   [(memq (id-sym (car form)) '(fn lambda while)) form]
+                   [(eq? (id-sym (car form)) 'continue)
+                    `(do ,incr (continue))]
+                   [else (map walk form)])))
+             stmts)))
+    (define expand-body
+      (lambda (body)
+        (let ([expanded (local-expand `(do ,@body))])
+          (if (and (pair? expanded) (eq? (id-sym (car expanded)) 'do))
+              (cdr expanded)
+              (list expanded)))))
+    [(_ i to limit body ...)
+     (let* ([incr `(set! ,i (+ ,i 1))]
+            [stmts (expand-body body)]
+            [walked (walk-continue stmts incr)])
+       `(block (let ,i 0)
+              (while (< ,i ,limit)
+                ,@walked
+                ,incr)))]))
+```
+
+Local helpers have access to the same functions as `macro-case` templates:
+`id-sym`, `anchor-error`, `anchor-gensym`, `datum->syntax`, `is-struct?`,
+`local-expand`, `filter-map`, and syntax record accessors (`stx?`, `stx-sym`,
+`stx-marks`, `stx-src`, `make-stx`).
 
 ---
 
