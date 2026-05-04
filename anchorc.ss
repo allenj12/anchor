@@ -29,6 +29,11 @@
 (include "anchor/codegen.ss")
 (include "anchor/prelude-embedded.ss")
 
+(define windows?
+  (let ([m (symbol->string (machine-type))])
+    (and (fx>= (string-length m) 2)
+         (string=? "nt" (substring m (fx- (string-length m) 2) (string-length m))))))
+
 ;; ---------------------------------------------------------------------------
 ;; Argument parsing
 ;; ---------------------------------------------------------------------------
@@ -39,7 +44,7 @@
         [run?     #f]
         [emit-ast #f]
         [emit-exp #f]
-        [cc       "cc"]
+        [cc       (if windows? "cl" "cc")]
         [cflags   ""])
     (let loop ([rest args])
       (cond
@@ -141,6 +146,13 @@
     (unless (fx= r 0)
       (anchor-error "command failed" cmd))))
 
+(define (make-cc-command cc c-path bin-path cflags)
+  (let ([flags (if (string=? cflags "") "" (string-append " " cflags))])
+    (if (string=? cc "cl")
+        ;; MSVC: output flag must immediately follow /Fe with no space
+        (string-append "cl /nologo /O2 /Fe:" bin-path " " c-path flags)
+        (string-append cc " -O2 " c-path flags " -o " bin-path))))
+
 (define (write-c-file c-src path)
   (when (file-exists? path) (delete-file path))
   (call-with-port (open-output-file path)
@@ -205,19 +217,18 @@
                                [else #f])])
              (write-c-file c-src c-path)
              (when bin-path
-               (let* ([flags (if (string=? cflags "") "" (string-append " " cflags))]
-                      [cmd (string-append cc " -O2 " c-path
-                                         flags
-                                         " -o " bin-path)])
-                 (display (string-append "anchorc: cc " c-path " -o " bin-path "\n"))
+               (let ([cmd (make-cc-command cc c-path bin-path cflags)])
+                 (display (string-append "anchorc: " cc " " c-path " -o " bin-path "\n"))
                  (run-command cmd)))
              (when run?
-               ;; Prefix with ./ when there's no directory component so the
-               ;; binary is found without needing . in PATH.
-               (run-command
-                 (if (string=? (path-parent base) "")
-                     (string-append "./" base)
-                     base))))])))
+               ;; cl.exe appends .exe automatically; add it so the invocation is explicit.
+               (let ([exe (if (and windows? (string=? cc "cl"))
+                              (string-append base ".exe")
+                              base)])
+                 (run-command
+                   (if (string=? (path-parent exe) "")
+                       (string-append "./" exe)
+                       exe)))))])))
 
   (exit 0))
 
