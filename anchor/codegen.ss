@@ -720,21 +720,29 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
                       [fn    (id-sym (caddr ao))]
                       [csn   (c-ident sn)]
                       [cfn   (c-ident fn)]
-                      [_     (or (hashtable-ref (ctx-structs ctx) sn #f)
+                      [stbl  (or (hashtable-ref (ctx-structs ctx) sn #f)
                                  (anchor-error "%scalar/%addr-offset: unknown struct" sn))]
+                      [finfo (hashtable-ref stbl fn #f)]
+                      [fsz   (if finfo (cadr finfo) 0)]
                       [tmp   (ctx-tmp! ctx)])
                  (if (and (pair? inner) (eq? (id-sym (car inner)) '+))
                    ;; two-level fast path: (%scalar (%addr-offset (%ptr+ base off) S f))
                    ;; emit _ANCH_HPTR(base) + _ANCH_IVAL(off) + FIELD — base is loop-hoistable
                    (let* ([base-e (emit-expr (cadr inner) ctx pre)]
                           [off-e  (emit-expr (caddr inner) ctx pre)])
-                     (pre-add! pre (string-append "AnchorVal " tmp " = 0;"))
-                     (pre-add! pre (string-append "__builtin_memcpy(&" tmp ", (char*)_ANCH_HPTR(" base-e ") + _ANCH_IVAL(" off-e ") + ANCHOR_OFFSET_" csn "_" cfn ", ANCHOR_SIZE_" csn "_" cfn ");"))
+                     (if (fx= fsz 8)
+                       (pre-add! pre (string-append "AnchorVal " tmp " = *(AnchorVal*)((char*)_ANCH_HPTR(" base-e ") + _ANCH_IVAL(" off-e ") + ANCHOR_OFFSET_" csn "_" cfn ");"))
+                       (begin
+                         (pre-add! pre (string-append "AnchorVal " tmp " = 0;"))
+                         (pre-add! pre (string-append "__builtin_memcpy(&" tmp ", (char*)_ANCH_HPTR(" base-e ") + _ANCH_IVAL(" off-e ") + ANCHOR_OFFSET_" csn "_" cfn ", ANCHOR_SIZE_" csn "_" cfn ");"))))
                      tmp)
                    ;; single-level fast path: (%scalar (%addr-offset base S f))
                    (let ([ptr-e (emit-expr inner ctx pre)])
-                     (pre-add! pre (string-append "AnchorVal " tmp " = 0;"))
-                     (pre-add! pre (string-append "__builtin_memcpy(&" tmp ", (char*)_ANCH_HPTR(" ptr-e ") + ANCHOR_OFFSET_" csn "_" cfn ", ANCHOR_SIZE_" csn "_" cfn ");"))
+                     (if (fx= fsz 8)
+                       (pre-add! pre (string-append "AnchorVal " tmp " = *(AnchorVal*)((char*)_ANCH_HPTR(" ptr-e ") + ANCHOR_OFFSET_" csn "_" cfn ");"))
+                       (begin
+                         (pre-add! pre (string-append "AnchorVal " tmp " = 0;"))
+                         (pre-add! pre (string-append "__builtin_memcpy(&" tmp ", (char*)_ANCH_HPTR(" ptr-e ") + ANCHOR_OFFSET_" csn "_" cfn ", ANCHOR_SIZE_" csn "_" cfn ");"))))
                      tmp)))]
               [(and (pair? arg) (eq? (id-sym (car arg)) '+))
                (let* ([ro    (cdr arg)]
