@@ -270,6 +270,150 @@
         (return r))
     (return r)))
 
+;; ---------------------------------------------------------------------------
+;; for — unified loop macro
+;;
+;; Range forms:
+;;   (for range (i limit)              body ...)   0 to limit-1
+;;   (for range (i start limit)        body ...)   start to limit-1
+;;
+;; Each forms (arrays):
+;;   (for each (val arr len)           body ...)   value at each slot
+;;   (for each ((val i) arr len)       body ...)   value + index
+;;   (for each (Type p arr count)      body ...)   pointer to each element
+;;   (for each (Type (p i) arr count)  body ...)   pointer + index
+;;
+;; Each forms (cons list):
+;;   (for each (n lst ->)              body ...)   walk cons list
+;;   (for each ((n i) lst ->)          body ...)   walk cons list + index
+;;
+;; - continue/break work correctly (increment auto-inserted before continue)
+;; - limit/arr/len/count evaluated once before the loop
+;; - untyped arrays use offset bump for loop-invariant base (vectorization)
+;; - typed arrays use pointer bump
+;; - list walks until null
+;; ---------------------------------------------------------------------------
+
+(define-syntax for
+  (macro-case (range each ->)
+
+    (define expand-body
+      (lambda (body)
+        (let ([expanded (local-expand `(do ,@body))])
+          (if (and (pair? expanded) (eq? (id-sym (car expanded)) 'do))
+              (cdr expanded)
+              (list expanded)))))
+
+    (define walk-continue
+      (lambda (stmts incr)
+        (map (lambda (s)
+               (let walk ([form s])
+                 (cond
+                   [(not (pair? form)) form]
+                   [(memq (id-sym (car form)) '(fn lambda while)) form]
+                   [(eq? (id-sym (car form)) 'continue)
+                    `(do ,incr (continue))]
+                   [else (map walk form)])))
+             stmts)))
+
+    ;; --- range (i limit) ---
+    [(_ range (i limit) body ...)
+     (let* ([incr   `(set! ,i (+ ,i 1))]
+            [stmts  (expand-body body)]
+            [walked (walk-continue stmts incr)])
+       `(block (let _lim ,limit)
+               (let ,i 0)
+               (while (< ,i _lim)
+                 ,@walked
+                 ,incr)))]
+
+    ;; --- range (i start limit) ---
+    [(_ range (i start limit) body ...)
+     (let* ([incr   `(set! ,i (+ ,i 1))]
+            [stmts  (expand-body body)]
+            [walked (walk-continue stmts incr)])
+       `(block (let _lim ,limit)
+               (let ,i ,start)
+               (while (< ,i _lim)
+                 ,@walked
+                 ,incr)))]
+
+    ;; --- each ((val i) lst ->) — cons list + index ---
+    [(_ each ((val i) lst ->) body ...)
+     (let* ([incr   `(do (set! _cell (get _cell Cons cdr))
+                         (set! ,i (+ ,i 1)))]
+            [stmts  (expand-body body)]
+            [walked (walk-continue stmts incr)])
+       `(block (let _cell ,lst)
+               (let ,i 0)
+               (while _cell
+                 (let ,val (get _cell Cons car))
+                 ,@walked
+                 ,incr)))]
+
+    ;; --- each (val lst ->) — cons list ---
+    [(_ each (val lst ->) body ...)
+     (let* ([incr   `(set! _cell (get _cell Cons cdr))]
+            [stmts  (expand-body body)]
+            [walked (walk-continue stmts incr)])
+       `(block (let _cell ,lst)
+               (while _cell
+                 (let ,val (get _cell Cons car))
+                 ,@walked
+                 ,incr)))]
+
+    ;; --- each (Type (p i) arr count) — typed, pointer + index ---
+    [(_ each (Type (p i) arr count) body ...)
+     (is-struct? Type)
+     (let* ([incr   `(do (set! ,p (+ ,p (sizeof ,Type)))
+                         (set! ,i (+ ,i 1)))]
+            [stmts  (expand-body body)]
+            [walked (walk-continue stmts incr)])
+       `(block (let _end (+ ,arr (* ,count (sizeof ,Type))))
+               (let ,p ,arr)
+               (let ,i 0)
+               (while (< ,p _end)
+                 ,@walked
+                 ,incr)))]
+
+    ;; --- each (Type p arr count) — typed, pointer only ---
+    [(_ each (Type p arr count) body ...)
+     (is-struct? Type)
+     (let* ([incr   `(set! ,p (+ ,p (sizeof ,Type)))]
+            [stmts  (expand-body body)]
+            [walked (walk-continue stmts incr)])
+       `(block (let _end (+ ,arr (* ,count (sizeof ,Type))))
+               (let ,p ,arr)
+               (while (< ,p _end)
+                 ,@walked
+                 ,incr)))]
+
+    ;; --- each ((val i) arr len) — untyped, value + index ---
+    [(_ each ((val i) arr len) body ...)
+     (let* ([incr   `(do (set! _off (+ _off 8))
+                         (set! ,i (+ ,i 1)))]
+            [stmts  (expand-body body)]
+            [walked (walk-continue stmts incr)])
+       `(block (let _off 0)
+               (let _end (* ,len 8))
+               (let ,i 0)
+               (while (< _off _end)
+                 (let ,val (get ,arr _off))
+                 ,@walked
+                 ,incr)))]
+
+    ;; --- each (val arr len) — untyped, value only ---
+    [(_ each (val arr len) body ...)
+     (let* ([incr   `(set! _off (+ _off 8))]
+            [stmts  (expand-body body)]
+            [walked (walk-continue stmts incr)])
+       `(block (let _off 0)
+               (let _end (* ,len 8))
+               (while (< _off _end)
+                 (let ,val (get ,arr _off))
+                 ,@walked
+                 ,incr)))]))
+
 (define-syntax when
   (syntax-rules ()
     [(_ test body ...)

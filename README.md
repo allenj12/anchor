@@ -835,6 +835,32 @@ level; `null?` simply tests whether the value is zero.
 (set-cdr! lst (cons 5 nil)) ; replace tail
 ```
 
+### For loops
+
+`for` is a unified loop macro with `range` and `each` forms. `continue` and `break` work correctly — the increment is auto-inserted before `continue`.
+
+```anchor
+;; range
+(for range (i 10) (printf "%lld " i))           ; 0 to 9
+(for range (i 3 8) (printf "%lld " i))           ; 3 to 7
+
+;; untyped array
+(for each (val arr len) (printf "%lld " val))
+(for each ((val i) arr len) (printf "%lld:%lld " i val))
+
+;; typed struct array
+(for each (Point p points count)
+  (printf "(%lld,%lld) " (get p Point x) (get p Point y)))
+(for each (Point (p i) points count)
+  (set! p Point x (* i 10)))
+
+;; cons list
+(for each (v lst ->) (printf "%lld " v))
+(for each ((v i) lst ->) (printf "%lld:%lld " i v))
+```
+
+Limits, lengths, and counts are evaluated once. Untyped array iteration uses an offset-bump pattern that keeps the base pointer loop-invariant, enabling SIMD auto-vectorization in the generated C.
+
 ### Symbols
 
 Symbols pack short strings (up to 7 bytes UTF-8) into a single `AnchorVal` integer.

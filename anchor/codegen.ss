@@ -741,14 +741,12 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
                       [ptr-e (emit-expr (car ro) ctx pre)]
                       [off-e (emit-expr (cadr ro) ctx pre)]
                       [tmp   (ctx-tmp! ctx)])
-                 (pre-add! pre (string-append "AnchorVal " tmp " = 0;"))
-                 (pre-add! pre (string-append "__builtin_memcpy(&" tmp ", (char*)_ANCH_HPTR(" ptr-e ") + _ANCH_IVAL(" off-e "), 8);"))
+                 (pre-add! pre (string-append "AnchorVal " tmp " = *(AnchorVal*)((char*)_ANCH_HPTR(" ptr-e ") + _ANCH_IVAL(" off-e "));"))
                  tmp)]
               [else
                (let* ([a   (emit-expr arg ctx pre)]
                       [tmp (ctx-tmp! ctx)])
-                 (pre-add! pre (string-append "AnchorVal " tmp " = 0;"))
-                 (pre-add! pre (string-append "__builtin_memcpy(&" tmp ", _ANCH_HPTR(" a "), 8);"))
+                 (pre-add! pre (string-append "AnchorVal " tmp " = *(AnchorVal*)_ANCH_HPTR(" a ");"))
                  tmp)]))]
 
          ;; %sized-read — read N bytes from address into AnchorVal (zero-extended)
@@ -1279,26 +1277,15 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
                    (for-each (lambda (s) (emit-stmt s ctx)) (cdr args))
                    (ctx-dedent! ctx)
                    (ctx-emit! ctx "}"))
-                 ;; Complex condition with temporaries.
-                 ;; Split each pre item "TYPE name = EXPR;" into a declaration
-                 ;; "TYPE name;" and an assignment "name = EXPR;" so we can:
-                 ;;   1. declare temps before the while
-                 ;;   2. assign them (initial evaluation)
-                 ;;   3. while (cond) { body; re-assign temps; }
-                 ;; This keeps the natural while(cond) form without shadowing.
-                 (let* ([splits  (map pre-item-split (pre-list pre))]
-                        [decls   (let loop ([ss splits] [acc '()])
-                                   (if (null? ss) (reverse acc)
-                                       (loop (cdr ss) (if (car (car ss))
-                                                          (cons (car (car ss)) acc)
-                                                          acc))))]
-                        [assigns (map cdr splits)])
-                   (for-each (lambda (d) (ctx-emit! ctx d)) decls)
-                   (for-each (lambda (a) (ctx-emit! ctx a)) assigns)
-                   (ctx-emit! ctx (string-append "while (_ANCH_IVAL(" cond-e ")) {"))
+                 ;; Complex condition with temporaries — wrap in statement expression.
+                 ;; Re-evaluated each iteration, temps scoped inside ({ ... }).
+                 (let ([cond-se (apply string-append "({ "
+                                  (append (map (lambda (s) (string-append s "\n"))
+                                               (pre-list pre))
+                                          (list cond-e "; })")))])
+                   (ctx-emit! ctx (string-append "while (_ANCH_IVAL(" cond-se ")) {"))
                    (ctx-indent! ctx)
                    (for-each (lambda (s) (emit-stmt s ctx)) (cdr args))
-                   (for-each (lambda (a) (ctx-emit! ctx a)) assigns)
                    (ctx-dedent! ctx)
                    (ctx-emit! ctx "}")))
              (ctx-loop-arena-stack-set! ctx saved-loop-stack))]
