@@ -51,8 +51,6 @@ via `--cflags` using MSVC syntax:
 anchorc main.anc -o main --cflags "/I C:\path\to\include somelib.lib"
 ```
 
-[vcpkg](https://vcpkg.io/) is a convenient way to install C libraries on Windows.
-
 **Using MinGW/MSYS2 instead.** If you prefer GCC, install
 [MSYS2](https://www.msys2.org/), add `C:\msys64\mingw64\bin` to your `PATH`, and
 pass `--cc gcc`:
