@@ -1,6 +1,7 @@
 ;;; codegen.ss — Anchor AST → C source
 
 (define *multi-threaded* #f)
+(define *msvc* #f)
 
 (define *anchor-runtime-h*
 "#include <stddef.h>
@@ -1281,17 +1282,28 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
                    (for-each (lambda (s) (emit-stmt s ctx)) (cdr args))
                    (ctx-dedent! ctx)
                    (ctx-emit! ctx "}"))
-                 ;; Complex condition with temporaries — wrap in statement expression.
-                 ;; Re-evaluated each iteration, temps scoped inside ({ ... }).
-                 (let ([cond-se (apply string-append "({ "
-                                  (append (map (lambda (s) (string-append s "\n"))
-                                               (pre-list pre))
-                                          (list cond-e "; })")))])
-                   (ctx-emit! ctx (string-append "while (_ANCH_IVAL(" cond-se ")) {"))
-                   (ctx-indent! ctx)
-                   (for-each (lambda (s) (emit-stmt s ctx)) (cdr args))
-                   (ctx-dedent! ctx)
-                   (ctx-emit! ctx "}")))
+                 ;; Complex condition with temporaries — re-evaluated each iteration.
+                 ;; GCC/Clang: wrap in a statement expression ({ pre; cond; }).
+                 ;; MSVC: restructure as while(1) { pre; if (!cond) break; body; }
+                 ;;   — pure C, no extensions, semantically identical.
+                 (if *msvc*
+                     (begin
+                       (ctx-emit! ctx "while (1) {")
+                       (ctx-indent! ctx)
+                       (for-each (lambda (s) (ctx-emit! ctx s)) (pre-list pre))
+                       (ctx-emit! ctx (string-append "if (!_ANCH_IVAL(" cond-e ")) break;"))
+                       (for-each (lambda (s) (emit-stmt s ctx)) (cdr args))
+                       (ctx-dedent! ctx)
+                       (ctx-emit! ctx "}"))
+                     (let ([cond-se (apply string-append "({ "
+                                      (append (map (lambda (s) (string-append s "\n"))
+                                                   (pre-list pre))
+                                              (list cond-e "; })")))])
+                       (ctx-emit! ctx (string-append "while (_ANCH_IVAL(" cond-se ")) {"))
+                       (ctx-indent! ctx)
+                       (for-each (lambda (s) (emit-stmt s ctx)) (cdr args))
+                       (ctx-dedent! ctx)
+                       (ctx-emit! ctx "}"))))
              (ctx-loop-arena-stack-set! ctx saved-loop-stack))]
 
           ;; break / continue — emit arena cleanup for arenas pushed inside the loop

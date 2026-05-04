@@ -195,7 +195,8 @@
            (let ([expanded (expand-all ast)])
              (for-each (lambda (node) (pretty-print node) (newline)) expanded))]
           [else
-           (let* ([expanded  (expand-all ast)]
+           (let* ([_         (set! *msvc* (string=? cc "cl"))]
+                  [expanded  (expand-all ast)]
                   [c-src     (anchor-generate expanded)]
                   [out-path  (opts 'output)]
                   [run?      (opts 'run?)]
