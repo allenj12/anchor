@@ -426,6 +426,20 @@
     [(_ test body ...)
      (if (! test) (do body ...))]))
 
+(define-syntax or
+  (syntax-rules ()
+    [(_ a)
+     a]
+    [(_ a rest ...)
+     (|| a (or rest ...))]))
+
+(define-syntax and
+    (syntax-rules ()
+      [(_ a)
+       a]
+      [(_ a rest ...)
+       (&& a (and rest ...))]))
+
 ;; ---------------------------------------------------------------------------
 ;; cond — multi-branch conditional with inline bindings
 ;;

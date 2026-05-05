@@ -129,7 +129,8 @@ static inline ANCHOR_PURE AnchorVal anchor_bor (AnchorVal a, AnchorVal b)   { re
 static inline ANCHOR_PURE AnchorVal anchor_bxor(AnchorVal a, AnchorVal b)   { return a ^ b; }
 static inline ANCHOR_PURE AnchorVal anchor_bnot(AnchorVal a)                { return ~a; }
 static inline ANCHOR_PURE AnchorVal anchor_lshift(AnchorVal a, AnchorVal b) { return a << b; }
-static inline ANCHOR_PURE AnchorVal anchor_rshift(AnchorVal a, AnchorVal b) { return (AnchorVal)((uint64_t)a >> b); }
+static inline ANCHOR_PURE AnchorVal anchor_rshift(AnchorVal a, AnchorVal b)  { return (AnchorVal)((uint64_t)a >> b); }
+static inline ANCHOR_PURE AnchorVal anchor_arshift(AnchorVal a, AnchorVal b) { return (AnchorVal)((int64_t)a >> b); }
 
 /* ---- Unsigned arithmetic ---- */
 
@@ -189,6 +190,10 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
                            [(#\?) (append (string->list "_p")   (loop (cdr cs)))]
                            [(#\>) (append (string->list "gt_")  (loop (cdr cs)))]
                            [(#\<) (append (string->list "lt_")  (loop (cdr cs)))]
+                           [(#\+) (append (string->list "_plus") (loop (cdr cs)))]
+                           [(#\*) (append (string->list "_star") (loop (cdr cs)))]
+                           [(#\/) (append (string->list "_slash") (loop (cdr cs)))]
+                           [(#\=) (append (string->list "_eq")  (loop (cdr cs)))]
                            [(#\%) (append (string->list "_pct_") (loop (cdr cs)))]
                            [(#\.) (append (string->list "_dot_") (loop (cdr cs)))]
                            [else  (cons (car cs) (loop (cdr cs)))]))))])
@@ -361,7 +366,7 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
     (u+ . "anchor_addu") (u- . "anchor_subu")  (u* . "anchor_mulu")
     (u/ . "anchor_divu") (u% . "anchor_modu")
     (band . "anchor_band") (bor . "anchor_bor") (bxor . "anchor_bxor")
-    (lshift . "anchor_lshift") (rshift . "anchor_rshift")))
+    (lshift . "anchor_lshift") (rshift . "anchor_rshift") (arshift . "anchor_arshift")))
 
 (define *cmp-ops*
   '((==  . "anchor_eq")  (!=  . "anchor_ne")

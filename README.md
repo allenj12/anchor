@@ -69,6 +69,10 @@ Run a file:
 ./anchorc examples/hello.anc --multi-threaded -o hello  # thread-safe arena pointer (uses _Thread_local)
 ```
 
+### Editor Support
+
+[VS Code extension](https://github.com/eoswald/vscode-anchor) — syntax highlighting for `.anc` files.
+
 ---
 
 ## Hello World
