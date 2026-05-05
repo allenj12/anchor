@@ -1,7 +1,6 @@
 ;;; codegen.ss — Anchor AST → C source
 
 (define *multi-threaded* #f)
-(define *msvc* #f)
 
 (define *anchor-runtime-h*
 "#include <stddef.h>
@@ -965,10 +964,22 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
          ;; do as expression (last item is the value)
          [(eq? h 'do)
           (if (null? args) "anchor_int(0)"
-              (let ([n (length args)])
-                (for-each (lambda (s) (emit-stmt-into s ctx pre))
-                          (list-head args (fx- n 1)))
-                (emit-expr (list-ref args (fx- n 1)) ctx pre)))]
+              (let* ([n       (length args)]
+                     [do-pre  (make-pre)]
+                     [_stmts  (for-each (lambda (s) (emit-stmt-into s ctx do-pre))
+                                        (list-head args (fx- n 1)))]
+                     [last-val (emit-expr (list-ref args (fx- n 1)) ctx do-pre)]
+                     [has-pre  (not (null? (car do-pre)))])
+                (if has-pre
+                    (let ([tmp (ctx-tmp! ctx)])
+                      (pre-add! pre (string-append "AnchorVal " tmp ";"))
+                      (pre-add! pre "{")
+                      (for-each (lambda (s) (pre-add! pre (string-append "    " s)))
+                                (pre-list do-pre))
+                      (pre-add! pre (string-append "    " tmp " = " last-val ";"))
+                      (pre-add! pre "}")
+                      tmp)
+                    last-val)))]
 
          ;; fn-ptr: take the address of a named Anchor function as an AnchorVal.
          ;; Use the registered C name so macro-introduced and user fns both resolve correctly.
@@ -1283,27 +1294,16 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
                    (ctx-dedent! ctx)
                    (ctx-emit! ctx "}"))
                  ;; Complex condition with temporaries — re-evaluated each iteration.
-                 ;; GCC/Clang: wrap in a statement expression ({ pre; cond; }).
-                 ;; MSVC: restructure as while(1) { pre; if (!cond) break; body; }
-                 ;;   — pure C, no extensions, semantically identical.
-                 (if *msvc*
-                     (begin
-                       (ctx-emit! ctx "while (1) {")
-                       (ctx-indent! ctx)
-                       (for-each (lambda (s) (ctx-emit! ctx s)) (pre-list pre))
-                       (ctx-emit! ctx (string-append "if (!_ANCH_IVAL(" cond-e ")) break;"))
-                       (for-each (lambda (s) (emit-stmt s ctx)) (cdr args))
-                       (ctx-dedent! ctx)
-                       (ctx-emit! ctx "}"))
-                     (let ([cond-se (apply string-append "({ "
-                                      (append (map (lambda (s) (string-append s "\n"))
-                                                   (pre-list pre))
-                                              (list cond-e "; })")))])
-                       (ctx-emit! ctx (string-append "while (_ANCH_IVAL(" cond-se ")) {"))
-                       (ctx-indent! ctx)
-                       (for-each (lambda (s) (emit-stmt s ctx)) (cdr args))
-                       (ctx-dedent! ctx)
-                       (ctx-emit! ctx "}"))))
+                 ;; Restructure as while(1) { pre; if (!cond) break; body; }
+                 ;; Pure C, no extensions, semantically identical to ({ pre; cond; }).
+                 (begin
+                   (ctx-emit! ctx "while (1) {")
+                   (ctx-indent! ctx)
+                   (for-each (lambda (s) (ctx-emit! ctx s)) (pre-list pre))
+                   (ctx-emit! ctx (string-append "if (!_ANCH_IVAL(" cond-e ")) break;"))
+                   (for-each (lambda (s) (emit-stmt s ctx)) (cdr args))
+                   (ctx-dedent! ctx)
+                   (ctx-emit! ctx "}")))
              (ctx-loop-arena-stack-set! ctx saved-loop-stack))]
 
           ;; break / continue — emit arena cleanup for arenas pushed inside the loop
