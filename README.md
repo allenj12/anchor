@@ -39,21 +39,24 @@ directory where you install `anchorc.exe` must be on your `PATH`.
 scheme --script build.ss   # note: 'scheme', not 'chez'  → anchorc.exe
 ```
 
-For programs that link against external C libraries, install
-[MSYS2](https://www.msys2.org/) and add `C:\msys64\mingw64\bin` to your `PATH`
-as well. Pass include/lib paths via `--cflags`:
+**C compiler.** The default backend on Windows is `cl.exe` (MSVC). Build and run
+from an **x64 Native Tools Command Prompt** (or equivalent Developer PowerShell)
+so the 64-bit compiler is on your `PATH`. Visual Studio Community or Build Tools
+for Visual Studio both provide this.
+
+For programs that link against external C libraries, pass include and library paths
+via `--cflags` using MSVC syntax:
 
 ```powershell
-anchorc main.anc -o main --cflags "-IC:/msys64/mingw64/include -LC:/msys64/mingw64/lib -lsomelib"
+anchorc main.anc -o main --cflags "/I C:\path\to\include somelib.lib"
 ```
 
-**Stack size.** Windows defaults to a 1 MB thread stack. Each `with-arena` scope
-allocates a 1 MB buffer on the stack, so programs with more than one nested
-arena scope will overflow immediately. Add `-Wl,--stack,16777216` to `--cflags`
-to raise the limit to 16 MB:
+**Using MinGW/MSYS2 instead.** If you prefer GCC, install
+[MSYS2](https://www.msys2.org/), add `C:\msys64\mingw64\bin` to your `PATH`, and
+pass `--cc gcc`:
 
 ```powershell
-anchorc main.anc -o main --cflags "-Wl,--stack,16777216"
+anchorc main.anc -o main --cc gcc --cflags "-IC:/msys64/mingw64/include -LC:/msys64/mingw64/lib -lsomelib"
 ```
 
 Run a file:

@@ -32,12 +32,14 @@ typedef uint64_t AnchorVal;
 #define _ANCH_IVAL(v)  ((intptr_t)(int64_t)(v))
 
 /* Float64: reinterpret bits as double */
-#define _ANCH_FVAL(v) \
-    ({ AnchorVal _av = (v); double _fv; __builtin_memcpy(&_fv, &_av, sizeof(double)); _fv; })
+static inline double _ANCH_FVAL(AnchorVal v) {
+    double _fv; memcpy(&_fv, &v, sizeof(double)); return _fv;
+}
 
 /* Float32: reinterpret low 32 bits as float */
-#define _ANCH_F32VAL(v) \
-    ({ uint32_t _bv = (uint32_t)(v); float _fv; __builtin_memcpy(&_fv, &_bv, sizeof(float)); _fv; })
+static inline float _ANCH_F32VAL(AnchorVal v) {
+    uint32_t _bv = (uint32_t)v; float _fv; memcpy(&_fv, &_bv, sizeof(float)); return _fv;
+}
 
 #if defined(__GNUC__) || defined(__clang__)
 #  define ANCHOR_PURE __attribute__((const))
@@ -60,13 +62,13 @@ static _Thread_local _AnchorArena* _anchor_arena_top = NULL;
 #else
 static _AnchorArena* _anchor_arena_top = NULL;
 #endif
-#define ANCHOR_DEFAULT_ARENA_CAP (1024 * 1024)
+#define ANCHOR_DEFAULT_ARENA_CAP 65536
 
 static inline AnchorVal anchor_alloc(size_t size) {
     _AnchorArena* a = _anchor_arena_top;
-    if (!a) __builtin_trap();
+    if (!a) abort();
     size_t aligned = (size + 7u) & ~7u;
-    if (a->used + aligned > a->cap) __builtin_trap();
+    if (a->used + aligned > a->cap) abort();
     AnchorVal r = (AnchorVal)(uintptr_t)(a->buf + a->used);
     a->used += aligned;
     return r;
@@ -94,7 +96,7 @@ static inline ANCHOR_PURE AnchorVal anchor_mod(AnchorVal a, AnchorVal b) { retur
 /* ---- Float constructor / arithmetic ---- */
 
 static inline ANCHOR_PURE AnchorVal anchor_float(double v) {
-    AnchorVal bits; __builtin_memcpy(&bits, &v, sizeof(double)); return bits;
+    AnchorVal bits; memcpy(&bits, &v, sizeof(double)); return bits;
 }
 static inline ANCHOR_PURE AnchorVal anchor_addf(AnchorVal a, AnchorVal b) { return anchor_float(_ANCH_FVAL(a) + _ANCH_FVAL(b)); }
 static inline ANCHOR_PURE AnchorVal anchor_subf(AnchorVal a, AnchorVal b) { return anchor_float(_ANCH_FVAL(a) - _ANCH_FVAL(b)); }
@@ -104,7 +106,7 @@ static inline ANCHOR_PURE AnchorVal anchor_divf(AnchorVal a, AnchorVal b) { retu
 /* ---- Float32 constructor / arithmetic ---- */
 
 static inline ANCHOR_PURE AnchorVal anchor_f32(float v) {
-    uint32_t bits; __builtin_memcpy(&bits, &v, sizeof(float)); return (AnchorVal)bits;
+    uint32_t bits; memcpy(&bits, &v, sizeof(float)); return (AnchorVal)bits;
 }
 static inline ANCHOR_PURE AnchorVal anchor_addf32(AnchorVal a, AnchorVal b) { return anchor_f32(_ANCH_F32VAL(a) + _ANCH_F32VAL(b)); }
 static inline ANCHOR_PURE AnchorVal anchor_subf32(AnchorVal a, AnchorVal b) { return anchor_f32(_ANCH_F32VAL(a) - _ANCH_F32VAL(b)); }
@@ -295,7 +297,7 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
                     (list (string-append "_anchor_arena_top->used = " sv "_used;")
                           (string-append "_anchor_arena_top->checkpoint = " sv "_prev;")))]
                  [(cdr entry)  ; use-heap?
-                  (list (string-append "__builtin_free(" (car entry) "_buf);")
+                  (list (string-append "free(" (car entry) "_buf);")
                         (string-append "_anchor_arena_top = " (car entry) ".prev;"))]
                  [else
                   (list (string-append "_anchor_arena_top = " (car entry) ".prev;"))]))
@@ -475,7 +477,7 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
          ;; trap — unconditional abort (__builtin_trap)
          [(eq? h 'trap)
           (unless (null? args) (anchor-error "trap: no arguments"))
-          (pre-add! pre "__builtin_trap();")
+          (pre-add! pre "abort();")
           "ANCHOR_NIL"]
 
          ;; embed-bytes: (embed-bytes bv) — raw bytevector as static data, no null terminator
@@ -537,18 +539,24 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
           => (lambda (p)
                (unless (fx= (length args) 2)
                  (anchor-error (symbol->string (id-sym h)) "requires exactly 2 arguments"))
-               (let* ([right-pre (make-pre)]
-                      [right-val (emit-expr (cadr args) ctx right-pre)]
-                      [right-has-pre (not (null? (car right-pre)))]
-                      [right-expr
-                       (if right-has-pre
-                           (apply string-append "({ "
-                                  (append (map (lambda (s) (string-append s "\n"))
-                                               (pre-list right-pre))
-                                          (list "(AnchorVal)!!" right-val "; })")))
-                           (string-append "!!" right-val))])
-                 (string-append "(AnchorVal)(!!" (emit-expr (car args) ctx pre)
-                                " " (cdr p) " " right-expr ")")))]
+               (let* ([left-val      (emit-expr (car args) ctx pre)]
+                      [right-pre     (make-pre)]
+                      [right-val     (emit-expr (cadr args) ctx right-pre)]
+                      [right-has-pre (not (null? (car right-pre)))])
+                 (if right-has-pre
+                     ;; Right side has preliminary statements — use a temp + if block
+                     ;; to avoid GCC statement expressions.
+                     (let* ([tmp      (ctx-tmp! ctx)]
+                            [is-and   (string=? (cdr p) "&&")]
+                            [cond-str (if is-and tmp (string-append "!" tmp))])
+                       (pre-add! pre (string-append "AnchorVal " tmp " = (AnchorVal)(!!" left-val ");"))
+                       (pre-add! pre (string-append "if (" cond-str ") {"))
+                       (for-each (lambda (s) (pre-add! pre (string-append "    " s))) (pre-list right-pre))
+                       (pre-add! pre (string-append "    " tmp " = (AnchorVal)(!!" right-val ");"))
+                       (pre-add! pre "}")
+                       tmp)
+                     (string-append "(AnchorVal)(!!" left-val
+                                    " " (cdr p) " !!" right-val ")"))))]
 
          [(eq? h '!)
           (unless (fx= (length args) 1) (anchor-error "! requires 1 argument"))
@@ -681,12 +689,12 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
                                 (anchor-error "deref/%addr-offset: unknown struct" sn))]
                      [tmp   (ctx-tmp! ctx)])
                 (pre-add! pre (string-append "AnchorVal " tmp ";"))
-                (pre-add! pre (string-append "__builtin_memcpy(&" tmp ", (char*)_ANCH_HPTR(" ptr-e ") + ANCHOR_OFFSET_" csn "_" cfn ", sizeof(AnchorVal));"))
+                (pre-add! pre (string-append "memcpy(&" tmp ", (char*)_ANCH_HPTR(" ptr-e ") + ANCHOR_OFFSET_" csn "_" cfn ", sizeof(AnchorVal));"))
                 tmp)
               (let* ([a   (emit-expr arg ctx pre)]
                      [tmp (ctx-tmp! ctx)])
                 (pre-add! pre (string-append "AnchorVal " tmp ";"))
-                (pre-add! pre (string-append "__builtin_memcpy(&" tmp ", _ANCH_HPTR(" a "), sizeof(AnchorVal));"))
+                (pre-add! pre (string-append "memcpy(&" tmp ", _ANCH_HPTR(" a "), sizeof(AnchorVal));"))
                 tmp)))]
 
          ;; %addr-offset — navigate one struct field, return address of field
@@ -734,7 +742,7 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
                        (pre-add! pre (string-append "AnchorVal " tmp " = *(AnchorVal*)((char*)_ANCH_HPTR(" base-e ") + _ANCH_IVAL(" off-e ") + ANCHOR_OFFSET_" csn "_" cfn ");"))
                        (begin
                          (pre-add! pre (string-append "AnchorVal " tmp " = 0;"))
-                         (pre-add! pre (string-append "__builtin_memcpy(&" tmp ", (char*)_ANCH_HPTR(" base-e ") + _ANCH_IVAL(" off-e ") + ANCHOR_OFFSET_" csn "_" cfn ", ANCHOR_SIZE_" csn "_" cfn ");"))))
+                         (pre-add! pre (string-append "memcpy(&" tmp ", (char*)_ANCH_HPTR(" base-e ") + _ANCH_IVAL(" off-e ") + ANCHOR_OFFSET_" csn "_" cfn ", ANCHOR_SIZE_" csn "_" cfn ");"))))
                      tmp)
                    ;; single-level fast path: (%scalar (%addr-offset base S f))
                    (let ([ptr-e (emit-expr inner ctx pre)])
@@ -742,7 +750,7 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
                        (pre-add! pre (string-append "AnchorVal " tmp " = *(AnchorVal*)((char*)_ANCH_HPTR(" ptr-e ") + ANCHOR_OFFSET_" csn "_" cfn ");"))
                        (begin
                          (pre-add! pre (string-append "AnchorVal " tmp " = 0;"))
-                         (pre-add! pre (string-append "__builtin_memcpy(&" tmp ", (char*)_ANCH_HPTR(" ptr-e ") + ANCHOR_OFFSET_" csn "_" cfn ", ANCHOR_SIZE_" csn "_" cfn ");"))))
+                         (pre-add! pre (string-append "memcpy(&" tmp ", (char*)_ANCH_HPTR(" ptr-e ") + ANCHOR_OFFSET_" csn "_" cfn ", ANCHOR_SIZE_" csn "_" cfn ");"))))
                      tmp)))]
               [(and (pair? arg) (eq? (id-sym (car arg)) '+))
                (let* ([ro    (cdr arg)]
@@ -774,17 +782,17 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
                             [off-e (emit-expr (cadr ro) ctx pre)]
                             [tmp   (ctx-tmp! ctx)])
                        (pre-add! pre (string-append "AnchorVal " tmp " = 0;"))
-                       (pre-add! pre (string-append "__builtin_memcpy(&" tmp ", (char*)_ANCH_HPTR(" ptr-e ") + _ANCH_IVAL(" off-e "), " sz-e ");"))
+                       (pre-add! pre (string-append "memcpy(&" tmp ", (char*)_ANCH_HPTR(" ptr-e ") + _ANCH_IVAL(" off-e "), " sz-e ");"))
                        tmp)]
                     [else
                      (let* ([a   (emit-expr addr-arg ctx pre)]
                             [tmp (ctx-tmp! ctx)])
                        (pre-add! pre (string-append "AnchorVal " tmp " = 0;"))
-                       (pre-add! pre (string-append "__builtin_memcpy(&" tmp ", _ANCH_HPTR(" a "), " sz-e ");"))
+                       (pre-add! pre (string-append "memcpy(&" tmp ", _ANCH_HPTR(" a "), " sz-e ");"))
                        tmp)])))
               ;; Runtime size — emit trap guard
               (let ([sz-e (string-append "_ANCH_IVAL(" (emit-expr sz-arg ctx pre) ")")])
-                (pre-add! pre (string-append "if (" sz-e " > 8) __builtin_trap();"))
+                (pre-add! pre (string-append "if (" sz-e " > 8) abort();"))
                 (cond
                   [(and (pair? addr-arg) (eq? (id-sym (car addr-arg)) '+))
                    (let* ([ro    (cdr addr-arg)]
@@ -792,13 +800,13 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
                           [off-e (emit-expr (cadr ro) ctx pre)]
                           [tmp   (ctx-tmp! ctx)])
                      (pre-add! pre (string-append "AnchorVal " tmp " = 0;"))
-                     (pre-add! pre (string-append "__builtin_memcpy(&" tmp ", (char*)_ANCH_HPTR(" ptr-e ") + _ANCH_IVAL(" off-e "), " sz-e ");"))
+                     (pre-add! pre (string-append "memcpy(&" tmp ", (char*)_ANCH_HPTR(" ptr-e ") + _ANCH_IVAL(" off-e "), " sz-e ");"))
                      tmp)]
                   [else
                    (let* ([a   (emit-expr addr-arg ctx pre)]
                           [tmp (ctx-tmp! ctx)])
                      (pre-add! pre (string-append "AnchorVal " tmp " = 0;"))
-                     (pre-add! pre (string-append "__builtin_memcpy(&" tmp ", _ANCH_HPTR(" a "), " sz-e ");"))
+                     (pre-add! pre (string-append "memcpy(&" tmp ", _ANCH_HPTR(" a "), " sz-e ");"))
                      tmp)]))))]
 
          ;; %sized-store — write N bytes of val to address
@@ -819,18 +827,18 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
                             [v     (emit-expr val-arg ctx pre)]
                             [tmp   (ctx-tmp! ctx)])
                        (pre-add! pre (string-append "{ AnchorVal " tmp " = " v ";"))
-                       (pre-add! pre (string-append "  __builtin_memcpy((char*)_ANCH_HPTR(" ptr-e ") + _ANCH_IVAL(" off-e "), &" tmp ", " sz-e "); }"))
+                       (pre-add! pre (string-append "  memcpy((char*)_ANCH_HPTR(" ptr-e ") + _ANCH_IVAL(" off-e "), &" tmp ", " sz-e "); }"))
                        "ANCHOR_NIL")]
                     [else
                      (let* ([a   (emit-expr addr-arg ctx pre)]
                             [v   (emit-expr val-arg ctx pre)]
                             [tmp (ctx-tmp! ctx)])
                        (pre-add! pre (string-append "{ AnchorVal " tmp " = " v ";"))
-                       (pre-add! pre (string-append "  __builtin_memcpy(_ANCH_HPTR(" a "), &" tmp ", " sz-e "); }"))
+                       (pre-add! pre (string-append "  memcpy(_ANCH_HPTR(" a "), &" tmp ", " sz-e "); }"))
                        "ANCHOR_NIL")])))
               ;; Runtime size — emit trap guard
               (let ([sz-e (string-append "_ANCH_IVAL(" (emit-expr sz-arg ctx pre) ")")])
-                (pre-add! pre (string-append "if (" sz-e " > 8) __builtin_trap();"))
+                (pre-add! pre (string-append "if (" sz-e " > 8) abort();"))
                 (cond
                   [(and (pair? addr-arg) (eq? (id-sym (car addr-arg)) '+))
                    (let* ([ro    (cdr addr-arg)]
@@ -839,14 +847,14 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
                           [v     (emit-expr val-arg ctx pre)]
                           [tmp   (ctx-tmp! ctx)])
                      (pre-add! pre (string-append "{ AnchorVal " tmp " = " v ";"))
-                     (pre-add! pre (string-append "  __builtin_memcpy((char*)_ANCH_HPTR(" ptr-e ") + _ANCH_IVAL(" off-e "), &" tmp ", " sz-e "); }"))
+                     (pre-add! pre (string-append "  memcpy((char*)_ANCH_HPTR(" ptr-e ") + _ANCH_IVAL(" off-e "), &" tmp ", " sz-e "); }"))
                      "ANCHOR_NIL")]
                   [else
                    (let* ([a   (emit-expr addr-arg ctx pre)]
                           [v   (emit-expr val-arg ctx pre)]
                           [tmp (ctx-tmp! ctx)])
                      (pre-add! pre (string-append "{ AnchorVal " tmp " = " v ";"))
-                     (pre-add! pre (string-append "  __builtin_memcpy(_ANCH_HPTR(" a "), &" tmp ", " sz-e "); }"))
+                     (pre-add! pre (string-append "  memcpy(_ANCH_HPTR(" a "), &" tmp ", " sz-e "); }"))
                      "ANCHOR_NIL")]))))]
 
          ;; %store — write AnchorVal to address
@@ -867,7 +875,7 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
                       [v     (emit-expr val-arg ctx pre)]
                       [tmp   (ctx-tmp! ctx)])
                  (pre-add! pre (string-append "{ AnchorVal " tmp " = " v ";"))
-                 (pre-add! pre (string-append "  __builtin_memcpy((char*)_ANCH_HPTR(" ptr-e ") + ANCHOR_OFFSET_" csn "_" cfn ", &" tmp ", sizeof(AnchorVal)); }"))
+                 (pre-add! pre (string-append "  memcpy((char*)_ANCH_HPTR(" ptr-e ") + ANCHOR_OFFSET_" csn "_" cfn ", &" tmp ", sizeof(AnchorVal)); }"))
                  "ANCHOR_NIL")]
               [(and (pair? addr-arg) (eq? (id-sym (car addr-arg)) '+))
                (let* ([ro    (cdr addr-arg)]
@@ -876,14 +884,14 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
                       [v     (emit-expr val-arg ctx pre)]
                       [tmp   (ctx-tmp! ctx)])
                  (pre-add! pre (string-append "{ AnchorVal " tmp " = " v ";"))
-                 (pre-add! pre (string-append "  __builtin_memcpy((char*)_ANCH_HPTR(" ptr-e ") + _ANCH_IVAL(" off-e "), &" tmp ", sizeof(AnchorVal)); }"))
+                 (pre-add! pre (string-append "  memcpy((char*)_ANCH_HPTR(" ptr-e ") + _ANCH_IVAL(" off-e "), &" tmp ", sizeof(AnchorVal)); }"))
                  "ANCHOR_NIL")]
               [else
                (let* ([a   (emit-expr addr-arg ctx pre)]
                       [v   (emit-expr val-arg ctx pre)]
                       [tmp (ctx-tmp! ctx)])
                  (pre-add! pre (string-append "{ AnchorVal " tmp " = " v ";"))
-                 (pre-add! pre (string-append "  __builtin_memcpy(_ANCH_HPTR(" a "), &" tmp ", sizeof(AnchorVal)); }"))
+                 (pre-add! pre (string-append "  memcpy(_ANCH_HPTR(" a "), &" tmp ", sizeof(AnchorVal)); }"))
                  "ANCHOR_NIL")]))]
 
          ;; %load-ptr — load an AnchorVal from a field and use it as the next base pointer.
@@ -910,12 +918,12 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
                    (let* ([base-e (emit-expr (cadr inner) ctx pre)]
                           [off-e  (emit-expr (caddr inner) ctx pre)])
                      (pre-add! pre (string-append "{ AnchorVal " tmp " = " v ";"))
-                     (pre-add! pre (string-append "  __builtin_memcpy((char*)_ANCH_HPTR(" base-e ") + _ANCH_IVAL(" off-e ") + ANCHOR_OFFSET_" csn "_" cfn ", &" tmp ", ANCHOR_SIZE_" csn "_" cfn "); }"))
+                     (pre-add! pre (string-append "  memcpy((char*)_ANCH_HPTR(" base-e ") + _ANCH_IVAL(" off-e ") + ANCHOR_OFFSET_" csn "_" cfn ", &" tmp ", ANCHOR_SIZE_" csn "_" cfn "); }"))
                      "ANCHOR_NIL")
                    ;; single-level fast path
                    (let ([ptr-e (emit-expr inner ctx pre)])
                      (pre-add! pre (string-append "{ AnchorVal " tmp " = " v ";"))
-                     (pre-add! pre (string-append "  __builtin_memcpy((char*)_ANCH_HPTR(" ptr-e ") + ANCHOR_OFFSET_" csn "_" cfn ", &" tmp ", ANCHOR_SIZE_" csn "_" cfn "); }"))
+                     (pre-add! pre (string-append "  memcpy((char*)_ANCH_HPTR(" ptr-e ") + ANCHOR_OFFSET_" csn "_" cfn ", &" tmp ", ANCHOR_SIZE_" csn "_" cfn "); }"))
                      "ANCHOR_NIL")))]
               [(and (pair? addr-arg) (eq? (id-sym (car addr-arg)) '+))
                (let* ([ro    (cdr addr-arg)]
@@ -924,14 +932,14 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
                       [v     (emit-expr val-arg ctx pre)]
                       [tmp   (ctx-tmp! ctx)])
                  (pre-add! pre (string-append "{ AnchorVal " tmp " = " v ";"))
-                 (pre-add! pre (string-append "  __builtin_memcpy((char*)_ANCH_HPTR(" ptr-e ") + _ANCH_IVAL(" off-e "), &" tmp ", sizeof(AnchorVal)); }"))
+                 (pre-add! pre (string-append "  memcpy((char*)_ANCH_HPTR(" ptr-e ") + _ANCH_IVAL(" off-e "), &" tmp ", sizeof(AnchorVal)); }"))
                  "ANCHOR_NIL")]
               [else
                (let* ([a   (emit-expr addr-arg ctx pre)]
                       [v   (emit-expr val-arg ctx pre)]
                       [tmp (ctx-tmp! ctx)])
                  (pre-add! pre (string-append "{ AnchorVal " tmp " = " v ";"))
-                 (pre-add! pre (string-append "  __builtin_memcpy(_ANCH_HPTR(" a "), &" tmp ", sizeof(AnchorVal)); }"))
+                 (pre-add! pre (string-append "  memcpy(_ANCH_HPTR(" a "), &" tmp ", sizeof(AnchorVal)); }"))
                  "ANCHOR_NIL")]))]
 
          ;; if as expression
@@ -956,21 +964,21 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
          ;; do as expression (last item is the value)
          [(eq? h 'do)
           (if (null? args) "anchor_int(0)"
-              (let* ([n      (length args)]
-                     [do-pre (make-pre)]
-                     [_stmts (for-each (lambda (s) (emit-stmt-into s ctx do-pre))
-                                       (list-head args (fx- n 1)))]
-                     [last-pre (make-pre)]
-                     [last-val (emit-expr (list-ref args (fx- n 1)) ctx last-pre)]
-                     [has-pre  (or (not (null? (car do-pre)))
-                                  (not (null? (car last-pre))))])
+              (let* ([n       (length args)]
+                     [do-pre  (make-pre)]
+                     [_stmts  (for-each (lambda (s) (emit-stmt-into s ctx do-pre))
+                                        (list-head args (fx- n 1)))]
+                     [last-val (emit-expr (list-ref args (fx- n 1)) ctx do-pre)]
+                     [has-pre  (not (null? (car do-pre)))])
                 (if has-pre
-                    (apply string-append "({ "
-                           (append (map (lambda (s) (string-append s "\n"))
-                                        (pre-list do-pre))
-                                   (map (lambda (s) (string-append s "\n"))
-                                        (pre-list last-pre))
-                                   (list last-val "; })")))
+                    (let ([tmp (ctx-tmp! ctx)])
+                      (pre-add! pre (string-append "AnchorVal " tmp ";"))
+                      (pre-add! pre "{")
+                      (for-each (lambda (s) (pre-add! pre (string-append "    " s)))
+                                (pre-list do-pre))
+                      (pre-add! pre (string-append "    " tmp " = " last-val ";"))
+                      (pre-add! pre "}")
+                      tmp)
                     last-val)))]
 
          ;; fn-ptr: take the address of a named Anchor function as an AnchorVal.
@@ -1285,14 +1293,14 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
                    (for-each (lambda (s) (emit-stmt s ctx)) (cdr args))
                    (ctx-dedent! ctx)
                    (ctx-emit! ctx "}"))
-                 ;; Complex condition with temporaries — wrap in statement expression.
-                 ;; Re-evaluated each iteration, temps scoped inside ({ ... }).
-                 (let ([cond-se (apply string-append "({ "
-                                  (append (map (lambda (s) (string-append s "\n"))
-                                               (pre-list pre))
-                                          (list cond-e "; })")))])
-                   (ctx-emit! ctx (string-append "while (_ANCH_IVAL(" cond-se ")) {"))
+                 ;; Complex condition with temporaries — re-evaluated each iteration.
+                 ;; Restructure as while(1) { pre; if (!cond) break; body; }
+                 ;; Pure C, no extensions, semantically identical to ({ pre; cond; }).
+                 (begin
+                   (ctx-emit! ctx "while (1) {")
                    (ctx-indent! ctx)
+                   (for-each (lambda (s) (ctx-emit! ctx s)) (pre-list pre))
+                   (ctx-emit! ctx (string-append "if (!_ANCH_IVAL(" cond-e ")) break;"))
                    (for-each (lambda (s) (emit-stmt s ctx)) (cdr args))
                    (ctx-dedent! ctx)
                    (ctx-emit! ctx "}")))
@@ -1681,9 +1689,9 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
            (let ([cap (if (and (number? arena-sz) (fx> arena-sz 0))
                           (number->string (exact arena-sz))
                           "ANCHOR_DEFAULT_ARENA_CAP")])
-             (set! use-heap (and (number? arena-sz) (fx> arena-sz 1048576)))
+             (set! use-heap (and (number? arena-sz) (fx> arena-sz 65536)))
              (if use-heap
-                 (ctx-emit! ctx (string-append "char* " av "_buf = (char*)__builtin_malloc(" cap ");"))
+                 (ctx-emit! ctx (string-append "char* " av "_buf = (char*)malloc(" cap ");"))
                  (ctx-emit! ctx (string-append "char " av "_buf[" cap "];")))
              (ctx-emit! ctx (string-append "_AnchorArena " av " = {" av "_buf, " cap ", 0, 0, _anchor_arena_top};"))
              (ctx-emit! ctx (string-append "_anchor_arena_top = &" av ";"))
@@ -1699,7 +1707,7 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
                   (ctx-emit! ctx (string-append "_anchor_arena_top = " global-arena ".prev;"))
                   (begin
                     (ctx-emit! ctx (string-append "_anchor_arena_top = " av ".prev;"))
-                    (when use-heap (ctx-emit! ctx (string-append "__builtin_free(" av "_buf);")))))
+                    (when use-heap (ctx-emit! ctx (string-append "free(" av "_buf);")))))
               (ctx-pop-arena! ctx)
               (ctx-arena-depth-set! ctx (fx- (ctx-arena-depth ctx) 1)))
             (ctx-emit! ctx (if (string=? ret "int") "return 0;" "return anchor_int(0);")))
@@ -1752,11 +1760,11 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
                              (emit-fn f ctx sz))) body)
              (let* ([cap      (if (fx> sz 0) (number->string sz) "ANCHOR_DEFAULT_ARENA_CAP")]
                     [av       (string-append "_anc_arena_" (ctx-tmp! ctx))]
-                    [use-heap (fx> sz 1048576)])
+                    [use-heap (fx> sz 65536)])
                (ctx-emit! ctx "{")
                (ctx-indent! ctx)
                (if use-heap
-                   (ctx-emit! ctx (string-append "char* " av "_buf = (char*)__builtin_malloc(" cap ");"))
+                   (ctx-emit! ctx (string-append "char* " av "_buf = (char*)malloc(" cap ");"))
                    (ctx-emit! ctx (string-append "char " av "_buf[" cap "];")))
                (ctx-emit! ctx (string-append "_AnchorArena " av " = {" av "_buf, " cap ", 0, 0, _anchor_arena_top};"))
                (ctx-emit! ctx (string-append "_anchor_arena_top = &" av ";"))
@@ -1764,7 +1772,7 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
                (ctx-arena-depth-set! ctx (fx+ (ctx-arena-depth ctx) 1))
                (for-each (lambda (f) (emit-stmt f ctx)) body)
                (ctx-emit! ctx (string-append "_anchor_arena_top = " av ".prev;"))
-               (when use-heap (ctx-emit! ctx (string-append "__builtin_free(" av "_buf);")))
+               (when use-heap (ctx-emit! ctx (string-append "free(" av "_buf);")))
                (ctx-pop-arena! ctx)
                (ctx-arena-depth-set! ctx (fx- (ctx-arena-depth ctx) 1))
                (ctx-dedent! ctx)
@@ -1987,9 +1995,9 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
          (let ([cap (if (and (number? arena-sz) (fx> arena-sz 0))
                         (number->string arena-sz)
                         "ANCHOR_DEFAULT_ARENA_CAP")])
-           (set! use-heap (and (number? arena-sz) (fx> arena-sz 1048576)))
+           (set! use-heap (and (number? arena-sz) (fx> arena-sz 65536)))
            (if use-heap
-               (ctx-emit! ctx (string-append "char* " av "_buf = (char*)__builtin_malloc(" cap ");"))
+               (ctx-emit! ctx (string-append "char* " av "_buf = (char*)malloc(" cap ");"))
                (ctx-emit! ctx (string-append "char " av "_buf[" cap "];")))
            (ctx-emit! ctx (string-append "_AnchorArena " av " = {" av "_buf, " cap ", 0, 0, _anchor_arena_top};"))
            (ctx-emit! ctx (string-append "_anchor_arena_top = &" av ";"))
@@ -2005,7 +2013,7 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
           (ctx-emit! ctx (string-append "_anchor_arena_top = " global-arena ".prev;"))
           (begin
             (ctx-emit! ctx (string-append "_anchor_arena_top = " av ".prev;"))
-            (when use-heap (ctx-emit! ctx (string-append "__builtin_free(" av "_buf);")))))
+            (when use-heap (ctx-emit! ctx (string-append "free(" av "_buf);")))))
       (ctx-pop-arena! ctx)
       (ctx-arena-depth-set! ctx (fx- (ctx-arena-depth ctx) 1)))
     (ctx-dedent! ctx)

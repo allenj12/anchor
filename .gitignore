@@ -18,6 +18,7 @@ editor/
 
 # Generated C output
 examples/*.c
+examples/*.exe
 examples/hello
 examples/fizzbuzz
 examples/array
@@ -25,3 +26,6 @@ examples/linked_list
 examples/structs
 examples/macros_showcase
 anchor/prelude-embedded.ss
+
+# Windows artifacts
+*.obj
