@@ -62,7 +62,7 @@ static _Thread_local _AnchorArena* _anchor_arena_top = NULL;
 #else
 static _AnchorArena* _anchor_arena_top = NULL;
 #endif
-#define ANCHOR_DEFAULT_ARENA_CAP (1024 * 1024)
+#define ANCHOR_DEFAULT_ARENA_CAP 65536
 
 static inline AnchorVal anchor_alloc(size_t size) {
     _AnchorArena* a = _anchor_arena_top;
@@ -1689,9 +1689,10 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
            (let ([cap (if (and (number? arena-sz) (fx> arena-sz 0))
                           (number->string (exact arena-sz))
                           "ANCHOR_DEFAULT_ARENA_CAP")])
-             (set! use-heap #t)
-             (ctx-emit! ctx (string-append "char* " av "_buf = (char*)malloc(" cap ");"))
-             (ctx-emit! ctx (string-append "if (!" av "_buf) abort();"))
+             (set! use-heap (and (number? arena-sz) (fx> arena-sz 65536)))
+             (if use-heap
+                 (ctx-emit! ctx (string-append "char* " av "_buf = (char*)malloc(" cap ");"))
+                 (ctx-emit! ctx (string-append "char " av "_buf[" cap "];")))
              (ctx-emit! ctx (string-append "_AnchorArena " av " = {" av "_buf, " cap ", 0, 0, _anchor_arena_top};"))
              (ctx-emit! ctx (string-append "_anchor_arena_top = &" av ";"))
              (ctx-push-arena! ctx av use-heap)
@@ -1759,11 +1760,12 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
                              (emit-fn f ctx sz))) body)
              (let* ([cap      (if (fx> sz 0) (number->string sz) "ANCHOR_DEFAULT_ARENA_CAP")]
                     [av       (string-append "_anc_arena_" (ctx-tmp! ctx))]
-                    [use-heap #t])
+                    [use-heap (fx> sz 65536)])
                (ctx-emit! ctx "{")
                (ctx-indent! ctx)
-               (ctx-emit! ctx (string-append "char* " av "_buf = (char*)malloc(" cap ");"))
-               (ctx-emit! ctx (string-append "if (!" av "_buf) abort();"))
+               (if use-heap
+                   (ctx-emit! ctx (string-append "char* " av "_buf = (char*)malloc(" cap ");"))
+                   (ctx-emit! ctx (string-append "char " av "_buf[" cap "];")))
                (ctx-emit! ctx (string-append "_AnchorArena " av " = {" av "_buf, " cap ", 0, 0, _anchor_arena_top};"))
                (ctx-emit! ctx (string-append "_anchor_arena_top = &" av ";"))
                (ctx-push-arena! ctx av use-heap)
@@ -1993,9 +1995,10 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
          (let ([cap (if (and (number? arena-sz) (fx> arena-sz 0))
                         (number->string arena-sz)
                         "ANCHOR_DEFAULT_ARENA_CAP")])
-           (set! use-heap #t)
-           (ctx-emit! ctx (string-append "char* " av "_buf = (char*)malloc(" cap ");"))
-           (ctx-emit! ctx (string-append "if (!" av "_buf) abort();"))
+           (set! use-heap (and (number? arena-sz) (fx> arena-sz 65536)))
+           (if use-heap
+               (ctx-emit! ctx (string-append "char* " av "_buf = (char*)malloc(" cap ");"))
+               (ctx-emit! ctx (string-append "char " av "_buf[" cap "];")))
            (ctx-emit! ctx (string-append "_AnchorArena " av " = {" av "_buf, " cap ", 0, 0, _anchor_arena_top};"))
            (ctx-emit! ctx (string-append "_anchor_arena_top = &" av ";"))
            (ctx-push-arena! ctx av use-heap)
