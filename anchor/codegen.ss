@@ -1825,6 +1825,7 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
       (ctx-dedent! ctx)
       (ctx-emit! ctx "}"))))
 
+
 (define (emit-global-arena node ctx)
   ;; (global-arena name size) — static buffer, linked into arena stack at runtime
   (let* ([items  (cdr node)]
@@ -1854,7 +1855,9 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
                      (anchor-error "array: float literals not supported (use integers or strings)")]
                     [(string? el)
                      (string-append "(AnchorVal)(uintptr_t)\"" (escape-c-str el) "\"")]
-                    [else (anchor-error "array: elements must be integer or string literals")]))
+                    [(sym? el)
+                     (string-append "(AnchorVal)(uintptr_t)" (c-ident el))]
+                    [else (anchor-error "array: elements must be integer literals, string literals, or symbols")]))
                 elements)
            ", ")])
     (ctx-globals-set! ctx
@@ -1862,6 +1865,22 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
               (list (string-append "static " (if const? "const " "") "AnchorVal " arr-name
                                    "[] = {" items "};"))))
     arr-name))
+
+;; Emit a constant expression as C. Handles integers, consts, sizeof, and arithmetic.
+(define (emit-const-expr e ctx)
+  (cond
+    [(and (number? e) (exact? e)) (number->string e)]
+    [(sym? e) (c-ident e)]
+    [(and (pair? e) (eq? (id-sym (car e)) 'sizeof))
+     (let ([ht (hashtable-ref (ctx-structs ctx) (id-sym (cadr e)) #f)])
+       (number->string
+         (or (and ht (hashtable-ref ht '_total #f))
+             (anchor-error "const expr: unknown struct" (cadr e)))))]
+    [(pair? e)
+     (let ([op (symbol->string (id-sym (car e)))]
+           [args (map (lambda (a) (emit-const-expr a ctx)) (cdr e))])
+       (string-append "(" (str-join args (string-append " " op " ")) ")"))]
+    [else (anchor-error "const expr: not a constant expression" e)]))
 
 (define (emit-global node ctx const?)
   (let* ([name  (cadr node)]
@@ -1876,7 +1895,7 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
                        (string-append "__attribute__((constructor)) static void _anc_init_" cname
                                       "(void) { " cname " = anchor_float(" (number->string expr) "); }"))))]
       [(and (number? expr) (exact? expr))
-       ;; Integer: raw int64 — static initializer
+       ;; Integer literal: raw int64 — static initializer
        (ctx-globals-set! ctx
          (append (ctx-globals ctx)
                  (list (string-append (if const? "const " "") "AnchorVal " cname
@@ -1896,34 +1915,24 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
                    (list (string-append (if const? "const " "") "AnchorVal " cname
                                         " = (AnchorVal)(uintptr_t)" arr-name ";")))))]
       [(and (pair? expr) (eq? (id-sym (car expr)) 'array-of))
-       ;; (array-of N) — zeroed static byte storage of N bytes
-       ;; (array-of (sizeof S)) — zeroed static storage sized for struct S
-       (let* ([sz-arg (cadr expr)]
-              [sz (cond
-                    [(and (number? sz-arg) (exact? sz-arg))
-                     (number->string sz-arg)]
-                    [(and (pair? sz-arg) (memv (id-sym (car sz-arg)) '(sizeof)))
-                     (let* ([sname (cadr sz-arg)]
-                            [anc-sz (let ([ht (hashtable-ref (ctx-structs ctx) (id-sym sname) #f)])
-                                      (and ht (hashtable-ref ht '_total #f)))])
-                       (if anc-sz
-                           (number->string anc-sz)
-                           (string-append "sizeof(" (c-ident sname) ")")))]
-                    [(and (pair? sz-arg) (eq? (id-sym (car sz-arg)) 'kb))
-                     (number->string (* (cadr sz-arg) 1024))]
-                    [(and (pair? sz-arg) (eq? (id-sym (car sz-arg)) 'mb))
-                     (number->string (* (cadr sz-arg) 1024 1024))]
-                    [else (anchor-error "array-of: argument must be a literal integer, (sizeof S), (kb N), or (mb N)")])])
+       ;; (array-of EXPR) — zeroed static byte storage
+       (let ([sz (emit-const-expr (cadr expr) ctx)])
          (ctx-globals-set! ctx
            (append (ctx-globals ctx)
                    (list (string-append "static char _g_" cname "_storage[" sz "];")
                          (string-append "AnchorVal " cname " = 0;")
                          (string-append "__attribute__((constructor)) static void _anc_init_" cname
                                         "(void) { " cname " = anchor_ext(_g_" cname "_storage); }")))))]
+      [(pair? expr)
+       ;; Arithmetic/constant expression — emit as C constant
+       (let ([c-expr (emit-const-expr expr ctx)])
+         (ctx-globals-set! ctx
+           (append (ctx-globals ctx)
+                   (list (string-append (if const? "const " "") "AnchorVal " cname
+                                        " = (AnchorVal)(int64_t)(" c-expr ");")))))]
       [else
        (anchor-error (string-append (if const? "const" "global")
-                                    ": initializer must be a literal (integer, float, string), (array ...), or (array-of N)"))])))
-
+                                    ": initializer must be a literal, string, (array ...), (array-of N), or constant expression"))])))
 (define (emit-fn-c node ctx . rest-args)
   ;; (fn-c name ((type... pname) ...) -> ret-type  body ...)
   ;; Emits a C-native-signature function.  Parameters are wrapped as AnchorVals
