@@ -1859,7 +1859,12 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
                      (string-append "(AnchorVal)(uintptr_t)\"" (escape-c-str el) "\"")]
                     [(sym? el)
                      (string-append "(AnchorVal)(uintptr_t)" (c-ident el))]
-                    [else (anchor-error "array: elements must be integer literals, string literals, or symbols")]))
+                    [(and (pair? el) (eq? (id-sym (car el)) 'f32) (number? (cadr el)))
+                     ;; (f32 literal) — 32-bit float pattern
+                     (let ([bv (make-bytevector 4)])
+                       (bytevector-ieee-single-native-set! bv 0 (inexact (cadr el)))
+                       (string-append "(AnchorVal)" (number->string (bytevector-u32-native-ref bv 0)) "u"))]
+                    [else (anchor-error "array: elements must be integer literals, float literals, string literals, symbols, or (f32 ...)")]))
                 elements)
            ", ")])
     (ctx-globals-set! ctx
@@ -1868,16 +1873,32 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
                                    "[] = {" items "};"))))
     arr-name))
 
-;; Emit a constant expression as C. Handles integers, consts, sizeof, and arithmetic.
+;; Emit a constant expression as C. Handles integers, consts, sizeof, f32, and arithmetic.
 (define (emit-const-expr e ctx)
   (cond
     [(and (number? e) (exact? e)) (number->string e)]
+    [(and (number? e) (inexact? e))
+     ;; f64 literal in const expr — convert to bits
+     (let ([bv (make-bytevector 8)])
+       (bytevector-ieee-double-native-set! bv 0 (inexact e))
+       (string-append "(AnchorVal)" (number->string (bytevector-u64-native-ref bv 0)) "ull"))]
     [(sym? e) (c-ident e)]
     [(and (pair? e) (eq? (id-sym (car e)) 'sizeof))
      (let ([ht (hashtable-ref (ctx-structs ctx) (id-sym (cadr e)) #f)])
        (number->string
          (or (and ht (hashtable-ref ht '_total #f))
              (anchor-error "const expr: unknown struct" (cadr e)))))]
+    [(and (pair? e) (eq? (id-sym (car e)) 'f32))
+     ;; (f32 literal) — convert float to 32-bit IEEE 754 pattern
+     (let ([arg (cadr e)])
+       (cond
+         [(number? arg)
+          (let ([bv (make-bytevector 4)])
+            (bytevector-ieee-single-native-set! bv 0 (inexact arg))
+            (string-append "(AnchorVal)" (number->string (bytevector-u32-native-ref bv 0)) "u"))]
+         [else
+          ;; Nested const expression — can't do compile-time f32 on non-literal
+          (anchor-error "f32 in const context requires a numeric literal")]))]
     [(pair? e)
      (let ([op (symbol->string (id-sym (car e)))]
            [args (map (lambda (a) (emit-const-expr a ctx)) (cdr e))])
@@ -1917,6 +1938,17 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
            (append (ctx-globals ctx)
                    (list (string-append (if const? "const " "") "AnchorVal " cname
                                         " = (AnchorVal)(uintptr_t)" arr-name ";")))))]
+      [(and (pair? expr) (eq? (id-sym (car expr)) 'f32))
+       ;; (f32 literal) — 32-bit float as compile-time constant
+       (let ([arg (cadr expr)])
+         (unless (number? arg)
+           (anchor-error "f32 in global/const context requires a numeric literal"))
+         (let ([bv (make-bytevector 4)])
+           (bytevector-ieee-single-native-set! bv 0 (inexact arg))
+           (ctx-globals-set! ctx
+             (append (ctx-globals ctx)
+                     (list (string-append (if const? "const " "") "AnchorVal " cname
+                                          " = (AnchorVal)" (number->string (bytevector-u32-native-ref bv 0)) "u;"))))))]
       [(and (pair? expr) (eq? (id-sym (car expr)) 'array-of))
        ;; (array-of EXPR) — zeroed static byte storage
        (let ([sz (emit-const-expr (cadr expr) ctx)])
