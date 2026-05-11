@@ -1852,7 +1852,9 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
                     [(and (number? el) (exact? el))
                      (string-append "(AnchorVal)(int64_t)" (number->string el))]
                     [(and (number? el) (inexact? el))
-                     (anchor-error "array: float literals not supported (use integers or strings)")]
+                     (let ([bv (make-bytevector 8)])
+                       (bytevector-ieee-double-native-set! bv 0 (inexact el))
+                       (string-append "(AnchorVal)" (number->string (bytevector-u64-native-ref bv 0)) "ull"))]
                     [(string? el)
                      (string-append "(AnchorVal)(uintptr_t)\"" (escape-c-str el) "\"")]
                     [(sym? el)
