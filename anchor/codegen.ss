@@ -1890,12 +1890,13 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
          [expr  (caddr node)])
     (cond
       [(and (number? expr) (inexact? expr))
-       ;; Float: must use constructor since anchor_float is not a constant expression
-       (ctx-globals-set! ctx
-         (append (ctx-globals ctx)
-                 (list (string-append "AnchorVal " cname " = 0;")
-                       (string-append "__attribute__((constructor)) static void _anc_init_" cname
-                                      "(void) { " cname " = anchor_float(" (number->string expr) "); }"))))]
+       ;; Float: convert to bit pattern at compile time
+       (let ([bv (make-bytevector 8)])
+         (bytevector-ieee-double-native-set! bv 0 (inexact expr))
+         (ctx-globals-set! ctx
+           (append (ctx-globals ctx)
+                   (list (string-append (if const? "const " "") "AnchorVal " cname
+                                        " = (AnchorVal)" (number->string (bytevector-u64-native-ref bv 0)) "ull;")))))]
       [(and (number? expr) (exact? expr))
        ;; Integer literal: raw int64 — static initializer
        (ctx-globals-set! ctx
