@@ -1958,6 +1958,13 @@ static inline ANCHOR_PURE AnchorVal anchor_not(AnchorVal a)              { retur
                          (string-append "AnchorVal " cname " = 0;")
                          (string-append "__attribute__((constructor)) static void _anc_init_" cname
                                         "(void) { " cname " = anchor_ext(_g_" cname "_storage); }")))))]
+      [(sym? expr)
+       ;; Symbol — reference to a const; resolve via emit-const-expr
+       (let ([c-expr (emit-const-expr expr ctx)])
+         (ctx-globals-set! ctx
+           (append (ctx-globals ctx)
+                   (list (string-append (if const? "const " "") "AnchorVal " cname
+                                        " = (AnchorVal)(int64_t)(" c-expr ");")))))]
       [(pair? expr)
        ;; Arithmetic/constant expression — emit as C constant
        (let ([c-expr (emit-const-expr expr ctx)])
