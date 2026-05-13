@@ -15,7 +15,7 @@ families of functions, and define other macros — all before a line of C is emi
 
 ## Build
 
-Requires [Chez Scheme](https://cisco.github.io/ChezScheme/).
+Requires [Chez Scheme](https://cisco.github.io/ChezScheme/) and [lz4](https://github.com/lz4/lz4).
 
 ```bash
 chez --script build.ss   # → ./anchorc  (standalone binary, no Chez needed to run)
