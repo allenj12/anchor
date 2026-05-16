@@ -10,8 +10,6 @@
 
 (include <stdio.h>)
 
-(ffi printf (const char* ...) -> int)
-
 ; ---------------------------------------------------------------------------
 ; 1. Simple syntax-rules
 ; ---------------------------------------------------------------------------
@@ -131,7 +129,7 @@
   (syntax-rules ()
     [(_ expr msg)
      (when (! expr)
-       (printf "ASSERT FAIL: %s\n" msg)
+       (print "ASSERT FAIL: %s\n" msg)
        (return 1))]))
 
 (define-syntax min2
@@ -252,33 +250,33 @@
 ;    become lists of lists.  Each ... level in the template peels one nesting.
 ; ---------------------------------------------------------------------------
 
-; emit-row-sums: each (x ...) group becomes a separate + and printf
+; emit-row-sums: each (x ...) group becomes a separate + and print
 (define-syntax emit-row-sums
   (syntax-rules ()
     [(_ (x ...) ...)
-     (do (printf "row = %lld\n" (+ x ...)) ...)]))
+     (do (print "row = %lld\n" (+ x ...)) ...)]))
 
 ; emit-named-sums: structured sub-pattern (name val ...)
 ; name is at depth 1, val is at depth 2
 (define-syntax emit-named-sums
   (syntax-rules ()
     [(_ (name val ...) ...)
-     (do (printf "%s = %lld\n" (cast char* name) (+ 0 val ...)) ...)]))
+     (do (print "%s = %lld\n" name (+ 0 val ...)) ...)]))
 
 ; table-print: mixed depth — title at depth 0, row-label at depth 1, val at depth 2
 (define-syntax table-print
   (syntax-rules ()
     [(_ title (row-label (val ...) ) ...)
      (do
-       (printf "=== %s ===\n" (cast char* title))
-       (printf "  %s: %lld\n" (cast char* row-label) (+ 0 val ...)) ...)]))
+       (print "=== %s ===\n" title)
+       (print "  %s: %lld\n" row-label (+ 0 val ...)) ...)]))
 
 ; emit-pairs: deeply structured ((a b) ...) ... — two levels of nesting
 (define-syntax emit-pairs
   (syntax-rules ()
     [(_ ((a b) ...) ...)
-     (do (do (printf "(%lld,%lld) " a b)
-             ... (printf "\n")) ...)]))
+     (do (do (print "(%lld,%lld) " a b)
+             ... (print "\n")) ...)]))
 
 ; ---------------------------------------------------------------------------
 ; Use define-struct: emits struct + constructor + accessors as top-level forms.
@@ -297,9 +295,9 @@
     ; --- when / unless ---
     (let x 7)
     (when (> x 5)
-      (printf "when: x > 5\n"))
+      (print "when: x > 5\n"))
     (unless (> x 10)
-      (printf "unless: x <= 10\n"))
+      (print "unless: x <= 10\n"))
 
     ; --- swap! hygiene ---
     ; We also declare a local called _tmp to prove it isn't captured.
@@ -307,34 +305,34 @@
     (let b 20)
     (let _tmp 999)
     (swap! a b)
-    (printf "swap: a=%d b=%d _tmp=%d (999 means no capture)\n"
-      (cast int a) (cast int b) (cast int _tmp))
+    (print "swap: a=%d b=%d _tmp=%d (999 means no capture)\n"
+      a b _tmp)
 
     ; --- my-and / my-or ---
     (let t 1)
     (let f 0)
-    (printf "my-and(1,1,0)=%d\n" (cast int (my-and t t f)))
-    (printf "my-or(0,0,1)=%d\n"  (cast int (my-or  f f t)))
+    (print "my-and(1,1,0)=%d\n" (my-and t t f))
+    (print "my-or(0,0,1)=%d\n"  (my-or  f f t))
 
     ; --- my-cond ---
     (let score 75)
     (my-cond
-      ((>= score 90) (printf "grade: A\n"))
-      ((>= score 75) (printf "grade: B\n"))
-      ((>= score 60) (printf "grade: C\n"))
-      (else          (printf "grade: F\n")))
+      ((>= score 90) (print "grade: A\n"))
+      ((>= score 75) (print "grade: B\n"))
+      ((>= score 60) (print "grade: C\n"))
+      (else          (print "grade: F\n")))
 
     ; --- for loop with 'to' literal ---
-    (printf "squares:")
+    (print "squares:")
     (for i 1 to 6
-      (printf " %d" (cast int (* i i))))
-    (printf "\n")
+      (print " %d" (* i i)))
+    (print "\n")
 
     ; --- dotimes ---
     (let sum 0)
     (dotimes (i 10)
       (set! sum (+ sum i)))
-    (printf "sum 0..9 = %d\n" (cast int sum))
+    (print "sum 0..9 = %d\n" sum)
 
     ; --- arena-array: size computed at expansion time ---
     ; (arena-array primes 2 3 5 7 11 13)
@@ -342,34 +340,34 @@
     ;             (set! primes 0 2)
     ;             ...
     (arena-array primes 2 3 5 7 11 13)
-    (printf "primes:")
+    (print "primes:")
     (for i 0 to 6
-      (printf " %d" (cast int (get primes (* i 8)))))
-    (printf "\n")
+      (print " %d" (get primes (* i 8))))
+    (print "\n")
 
     ; --- unroll: loop body repeated inline, no branch overhead ---
-    ; (unroll 4 (printf "tick\n"))
-    ; expands to four sequential printf calls with no loop.
+    ; (unroll 4 (print "tick\n"))
+    ; expands to four sequential print calls with no loop.
     (let ticks 0)
     (unroll 4
       (set! ticks (+ ticks 1)))
-    (printf "ticks after unroll(4): %d\n" (cast int ticks))
+    (print "ticks after unroll(4): %d\n" ticks)
 
     ; --- define-fold-op generated macros ---
-    (printf "my-add()=%d\n"        (cast int (my-add)))
-    (printf "my-add(1,2,3,4)=%d\n" (cast int (my-add 1 2 3 4)))
-    (printf "my-mul(2,3,4)=%d\n"   (cast int (my-mul 2 3 4)))
+    (print "my-add()=%d\n"        (my-add))
+    (print "my-add(1,2,3,4)=%d\n" (my-add 1 2 3 4))
+    (print "my-mul(2,3,4)=%d\n"   (my-mul 2 3 4))
 
     ; --- assert: nested macro (assert expands into when, which expands further) ---
     (let ok 1)
     (assert ok "ok should be true")          ; passes — no output
-    (printf "assert: passed (no crash)\n")
+    (print "assert: passed (no crash)\n")
 
     ; --- clamp: nested macro (clamp -> max2 -> if, min2 -> if) ---
     (let clamped (clamp 150 0 100))
-    (printf "clamp(150,0,100) = %d\n" (cast int clamped))
+    (print "clamp(150,0,100) = %d\n" clamped)
     (let clamped2 (clamp -5 0 100))
-    (printf "clamp(-5,0,100)  = %d\n" (cast int clamped2))
+    (print "clamp(-5,0,100)  = %d\n" clamped2)
 
     ; --- nested ellipsis ---
     (emit-row-sums (1 2 3) (10 20) (100 200 300 400))
@@ -382,16 +380,13 @@
       ("Alice" (90 85 92))
       ("Bob"   (70 80 75)))
 
-    (emit-pairs (((cast int64_t 1) (cast int64_t 2))
-                 ((cast int64_t 3) (cast int64_t 4))
-                 ((cast int64_t 5) (cast int64_t 6)))
-                (((cast int64_t 10) (cast int64_t 20))
-                 ((cast int64_t 30) (cast int64_t 40))))
+    (emit-pairs ((1 2) (3 4) (5 6))
+                ((10 20) (30 40)))
 
     ; --- define-struct generated accessors and constructor ---
     ; define-struct emitted: struct Vec2, make-Vec2, Vec2-x, Vec2-y
     ; at the top level above.  Here we use them normally.
     (let v (make-Vec2 3 4))
-    (printf "Vec2: x=%d y=%d\n"
-      (cast int (Vec2-x v))
-      (cast int (Vec2-y v)))))
+    (print "Vec2: x=%d y=%d\n"
+      (Vec2-x v)
+      (Vec2-y v))))

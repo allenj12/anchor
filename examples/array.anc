@@ -2,7 +2,6 @@
 ; Shows: get/set!, alloc, for macro, nested loops, helper functions
 
 (include <stdio.h>)
-(ffi printf (const char* ...) -> int)
 
 (define-syntax for
   (syntax-rules (to)
@@ -15,8 +14,8 @@
 
 (fn print-array (arr n)
   (for i 0 to n
-    (printf "%d " (cast int (get arr (* i 8)))))
-  (printf "\n"))
+    (print "%d " (get arr (* i 8))))
+  (print "\n"))
 
 (fn bubble-sort (arr n)
   (for i 0 to n
@@ -34,6 +33,6 @@
     (set! arr 0  42) (set! arr 8   7) (set! arr 16 19)
     (set! arr 24  3) (set! arr 32 55) (set! arr 40 12)
     (set! arr 48 28) (set! arr 56  1) (set! arr 64 33)
-    (printf "before: ") (print-array arr 9)
+    (print "before: ") (print-array arr 9)
     (bubble-sort arr 9)
-    (printf "after:  ") (print-array arr 9)))
+    (print "after:  ") (print-array arr 9)))

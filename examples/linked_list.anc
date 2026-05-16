@@ -4,8 +4,6 @@
 
 (include <stdio.h>)
 
-(ffi printf (const char* ...) -> int)
-
 ; ---------------------------------------------------------------------------
 ; cons allocates from the current arena — no explicit arena arg needed.
 ; (cons val next) → an AnchorVal whose .ptr points to a 2-slot cell.
@@ -41,14 +39,14 @@
 
 ; Print elements separated by spaces
 (fn print-list (lst)
-  (printf "(")
+  (print "(")
   (let cur lst)
   (while (! (null? cur))
-    (printf "%d" (cast int (car cur)))
+    (print "%d" (car cur))
     (set! cur (cdr cur))
     (if (! (null? cur))
-      (printf " ")))
-  (printf ")"))
+      (print " ")))
+  (print ")"))
 
 ; Reverse a list — builds new list in caller's arena
 (fn list-reverse (lst)
@@ -81,28 +79,28 @@
     ; Build a list from literal values
     (let lst (cons 1 (cons 2 (cons 3 (cons 4 (cons 5 nil))))))
 
-    (printf "list:    ")
+    (print "list:    ")
     (print-list lst)
-    (printf "\n")
+    (print "\n")
 
-    (printf "length:  %d\n" (cast int (list-length lst)))
-    (printf "sum:     %d\n" (cast int (list-sum lst)))
+    (print "length:  %d\n" (list-length lst))
+    (print "sum:     %d\n" (list-sum lst))
 
     (let rev (list-reverse lst))
-    (printf "reverse: ")
+    (print "reverse: ")
     (print-list rev)
-    (printf "\n")
+    (print "\n")
 
     (let evens (list-filter-even lst))
-    (printf "evens:   ")
+    (print "evens:   ")
     (print-list evens)
-    (printf "\n")
+    (print "\n")
 
     ; Build from array
     (let arr (alloc (* 6 8)))
     (set! arr 0  10) (set! arr 8  20) (set! arr 16 30)
     (set! arr 24 40) (set! arr 32 50) (set! arr 40 60)
     (let from-arr (list-from-arr arr 6))
-    (printf "from arr: ")
+    (print "from arr: ")
     (print-list from-arr)
-    (printf "\n")))
+    (print "\n")))

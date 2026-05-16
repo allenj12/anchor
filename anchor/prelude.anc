@@ -263,6 +263,75 @@
 
 (ffi strlen (const char*) -> int)
 (ffi memcpy (void* void* size_t) -> void*)
+(ffi printf (const char* ...) -> int)
+
+;; ---------------------------------------------------------------------------
+;; print — printf with auto-casting based on format specifiers
+;;
+;;   (print "x = %lld\n" x)       → (printf "x = %lld\n" (cast int64_t x))
+;;   (print "%s: %f\n" name val)  → (printf "%s: %f\n" (cast char* name) (cast double val))
+;;
+;; Parses the format string at compile time. Covers the full printf spec
+;; (minus %n). Errors at compile time on arg count mismatch or non-literal
+;; format strings.
+;; ---------------------------------------------------------------------------
+
+(define-syntax print
+  (macro-case ()
+    (define (C s) (char->integer (string-ref s 0)))
+    (define (at s i) (char->integer (string-ref s i)))
+
+    (define (spec->type lm spec)
+      (cond
+        [(memv spec (map C '("d" "i" "u" "o" "x" "X")))
+         (if (memv lm '(ll l)) 'int64_t 'int)]
+        [(memv spec (map C '("f" "F" "e" "E" "g" "G" "a" "A"))) 'double]
+        [(= spec (C "s")) (if (eq? lm 'l) 'wchar_t* 'char*)]
+        [(= spec (C "c")) (if (eq? lm 'l) 'wint_t 'int)]
+        [(= spec (C "p")) 'void*]
+        [else 'int64_t]))
+
+    (define (parse-specs s)
+      (let ([len (string-length s)])
+        (define (specifier? c)
+          (memv c (map C '("d" "i" "u" "o" "x" "X" "f" "F" "e" "E"
+                            "g" "G" "a" "A" "s" "c" "p"))))
+        (let loop ([i 0] [in-spec #f] [specs '()] [lm 'none])
+          (if (>= i len) (reverse specs)
+              (let ([c (at s i)])
+                (cond
+                  [(not in-spec)
+                   (if (= c (C "%"))
+                       (if (and (< (+ i 1) len) (= (at s (+ i 1)) (C "%")))
+                           (loop (+ i 2) #f specs 'none)
+                           (loop (+ i 1) #t specs 'none))
+                       (loop (+ i 1) #f specs 'none))]
+                  [(= c (C "*"))
+                   (loop (+ i 1) #t (cons 'int specs) lm)]
+                  [(= c (C "l"))
+                   (if (and (< (+ i 1) len) (= (at s (+ i 1)) (C "l")))
+                       (loop (+ i 2) #t specs 'll)
+                       (loop (+ i 1) #t specs 'l))]
+                  [(memv c (list (C "z") (C "j") (C "t")))
+                   (loop (+ i 1) #t specs 'l)]
+                  [(= c (C "%"))
+                   (anchor-error (format "print: malformed or unsupported specifier before position ~a" i))]
+                  [(specifier? c)
+                   (loop (+ i 1) #f (cons (spec->type lm c) specs) 'none)]
+                  [else
+                   (loop (+ i 1) #t specs lm)]))))))
+
+    [(_ fmt arg ...)
+     (let ([s (if (stx? fmt) (stx-sym fmt) fmt)])
+       (unless (string? s)
+         (anchor-error "print: first argument must be a string literal"))
+       (let* ([specs (parse-specs s)]
+              [args arg])
+         (unless (= (length specs) (length args))
+           (anchor-error (format "print: format has ~a specifiers but got ~a arguments"
+                           (length specs) (length args))))
+         (let ([casted (map (lambda (t a) `(cast ,t ,a)) specs args)])
+           `(printf ,fmt ,@casted))))]))
 
 (fn string->symbol (s)
   (let slen (strlen s))

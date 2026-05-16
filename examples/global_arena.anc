@@ -12,8 +12,6 @@
 
 (include <stdio.h>)
 
-(ffi printf (const char* ...) -> int)
-
 ; Declare a named global arena with a 64 KiB backing buffer.
 ; The buffer is static — allocated once, never freed.
 (global-arena scratch (kb 64))
@@ -30,14 +28,14 @@
 
 (fn print-list (lst)
   (while (! (null? lst))
-    (printf "%d " (cast int (car lst)))
+    (print "%d " (car lst))
     (set! lst (cdr lst)))
-  (printf "\n"))
+  (print "\n"))
 
 (fn main ()
   ; First list — lives in scratch
   (let lst1 (build-list 5))
-  (printf "list 1: ")
+  (print "list 1: ")
   (print-list lst1)
 
   ; Reset scratch — reclaims all allocations in one shot, O(1)
@@ -45,7 +43,7 @@
 
   ; Reuse the same backing memory for a second list
   (let lst2 (build-list 3))
-  (printf "list 2: ")
+  (print "list 2: ")
   (print-list lst2)
 
   (return 0))

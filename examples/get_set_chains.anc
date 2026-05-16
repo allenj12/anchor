@@ -20,7 +20,6 @@
 ;  13.  set! combinations
 
 (include <stdio.h>)
-(ffi printf (const char* ...) -> int)
 
 ; ---------------------------------------------------------------------------
 ; Struct definitions
@@ -42,13 +41,13 @@
   (set! arr 0       Point x 10)  (set! arr 0       Point y 11)
   (set! arr sz      Point x 20)  (set! arr sz      Point y 21)
   (set! arr (* 2 sz) Point x 30)  (set! arr (* 2 sz) Point y 31)
-  (printf "1: [0]=(%d,%d) [1]=(%d,%d) [2]=(%d,%d)\n"
-    (cast int (get arr 0        Point x))
-    (cast int (get arr 0        Point y))
-    (cast int (get arr sz       Point x))
-    (cast int (get arr sz       Point y))
-    (cast int (get arr (* 2 sz) Point x))
-    (cast int (get arr (* 2 sz) Point y))))
+  (print "1: [0]=(%d,%d) [1]=(%d,%d) [2]=(%d,%d)\n"
+    (get arr 0        Point x)
+    (get arr 0        Point y)
+    (get arr sz       Point x)
+    (get arr sz       Point y)
+    (get arr (* 2 sz) Point x)
+    (get arr (* 2 sz) Point y)))
 
 ; ---------------------------------------------------------------------------
 ; 2. offset first → -> follow (array of pointers)
@@ -61,17 +60,17 @@
   (set! arr 0 p0)
   (set! arr 8 p1)
   ; read: index arr → follow pointer → field
-  (printf "2: ptrs[0]=(%d,%d) ptrs[1]=(%d,%d)\n"
-    (cast int (get arr 0 -> Point x))
-    (cast int (get arr 0 -> Point y))
-    (cast int (get arr 8 -> Point x))
-    (cast int (get arr 8 -> Point y)))
+  (print "2: ptrs[0]=(%d,%d) ptrs[1]=(%d,%d)\n"
+    (get arr 0 -> Point x)
+    (get arr 0 -> Point y)
+    (get arr 8 -> Point x)
+    (get arr 8 -> Point y))
   ; set! through array-of-pointers
   (set! arr 0 -> Point x 110)
   (set! arr 8 -> Point y 211)
-  (printf "2: after set! ptrs[0].x=%d ptrs[1].y=%d\n"
-    (cast int (get p0 Point x))
-    (cast int (get p1 Point y))))
+  (print "2: after set! ptrs[0].x=%d ptrs[1].y=%d\n"
+    (get p0 Point x)
+    (get p1 Point y)))
 
 ; ---------------------------------------------------------------------------
 ; 3. Simple named chain  (get and set!)
@@ -81,9 +80,9 @@
   (let p (alloc (sizeof Point)))
   (set! p Point x 42)
   (set! p Point y 99)
-  (printf "3: x=%d y=%d\n"
-    (cast int (get p Point x))
-    (cast int (get p Point y))))
+  (print "3: x=%d y=%d\n"
+    (get p Point x)
+    (get p Point y)))
 
 ; ---------------------------------------------------------------------------
 ; 4. Deep named chain — struct embedding struct
@@ -95,10 +94,10 @@
   (set! o Outer inner Point x 7)
   (set! o Outer inner Point y 8)
   (set! o Outer tag 999)
-  (printf "4: inner=(%d,%d) tag=%d\n"
-    (cast int (get o Outer inner Point x))
-    (cast int (get o Outer inner Point y))
-    (cast int (get o Outer tag))))
+  (print "4: inner=(%d,%d) tag=%d\n"
+    (get o Outer inner Point x)
+    (get o Outer inner Point y)
+    (get o Outer tag)))
 
 ; ---------------------------------------------------------------------------
 ; 5. Named chain → -> field
@@ -109,11 +108,11 @@
   (let n2 (alloc (sizeof Node)))
   (set! n1 Node val 11)  (set! n1 Node nxt n2)
   (set! n2 Node val 22)  (set! n2 Node nxt 0)
-  (printf "5: n1.nxt->val=%d\n"
-    (cast int (get n1 Node nxt -> Node val)))
+  (print "5: n1.nxt->val=%d\n"
+    (get n1 Node nxt -> Node val))
   (set! n1 Node nxt -> Node val 99)
-  (printf "5: after set! n2.val=%d\n"
-    (cast int (get n2 Node val))))
+  (print "5: after set! n2.val=%d\n"
+    (get n2 Node val)))
 
 ; ---------------------------------------------------------------------------
 ; 6. Multi-hop -> ->
@@ -126,8 +125,8 @@
   (set! n1 Node val 1)  (set! n1 Node nxt n2)
   (set! n2 Node val 2)  (set! n2 Node nxt n3)
   (set! n3 Node val 3)  (set! n3 Node nxt 0)
-  (printf "6: two-hop val=%d\n"
-    (cast int (get n1 Node nxt -> Node nxt -> Node val))))
+  (print "6: two-hop val=%d\n"
+    (get n1 Node nxt -> Node nxt -> Node val)))
 
 ; ---------------------------------------------------------------------------
 ; 7. Named field as inline array base via aref
@@ -144,13 +143,13 @@
   (set! (aref g Grid cells)              Point x 10)  (set! (aref g Grid cells)              Point y 11)
   (set! (+ (aref g Grid cells) sz)       Point x 20)  (set! (+ (aref g Grid cells) sz)       Point y 21)
   (set! (+ (aref g Grid cells) (* 2 sz)) Point x 30)  (set! (+ (aref g Grid cells) (* 2 sz)) Point y 31)
-  (printf "7: cells[0]=(%d,%d) cells[1]=(%d,%d) cells[2]=(%d,%d)\n"
-    (cast int (get (aref g Grid cells)              Point x))
-    (cast int (get (aref g Grid cells)              Point y))
-    (cast int (get (+ (aref g Grid cells) sz)       Point x))
-    (cast int (get (+ (aref g Grid cells) sz)       Point y))
-    (cast int (get (+ (aref g Grid cells) (* 2 sz)) Point x))
-    (cast int (get (+ (aref g Grid cells) (* 2 sz)) Point y))))
+  (print "7: cells[0]=(%d,%d) cells[1]=(%d,%d) cells[2]=(%d,%d)\n"
+    (get (aref g Grid cells)              Point x)
+    (get (aref g Grid cells)              Point y)
+    (get (+ (aref g Grid cells) sz)       Point x)
+    (get (+ (aref g Grid cells) sz)       Point y)
+    (get (+ (aref g Grid cells) (* 2 sz)) Point x)
+    (get (+ (aref g Grid cells) (* 2 sz)) Point y)))
 
 ; ---------------------------------------------------------------------------
 ; 8. Named chain → -> → offset  (pointer-to-array in struct field)
@@ -166,16 +165,16 @@
   (let bag (alloc (sizeof Bag)))
   (set! bag Bag len n)
   (set! bag Bag items arr)
-  (printf "8: items[0]=(%d,%d) items[1]=(%d,%d) items[2]=(%d,%d)\n"
-    (cast int (get bag Bag items -> 0        Point x))
-    (cast int (get bag Bag items -> 0        Point y))
-    (cast int (get bag Bag items -> sz       Point x))
-    (cast int (get bag Bag items -> sz       Point y))
-    (cast int (get bag Bag items -> (* 2 sz) Point x))
-    (cast int (get bag Bag items -> (* 2 sz) Point y)))
+  (print "8: items[0]=(%d,%d) items[1]=(%d,%d) items[2]=(%d,%d)\n"
+    (get bag Bag items -> 0        Point x)
+    (get bag Bag items -> 0        Point y)
+    (get bag Bag items -> sz       Point x)
+    (get bag Bag items -> sz       Point y)
+    (get bag Bag items -> (* 2 sz) Point x)
+    (get bag Bag items -> (* 2 sz) Point y))
   (set! bag Bag items -> sz Point x 999)
-  (printf "8: after set! items[1].x=%d\n"
-    (cast int (get bag Bag items -> sz Point x))))
+  (print "8: after set! items[1].x=%d\n"
+    (get bag Bag items -> sz Point x)))
 
 ; ---------------------------------------------------------------------------
 ; 9. offset → -> → offset → named  (array of Bags, each with ptr-to-array)
@@ -195,12 +194,12 @@
   (set! arr1 psz  Point x 22)  (set! arr1 psz  Point y 23)
   (set! bags bsz  Bag len 2)
   (set! bags bsz  Bag items arr1)
-  (printf "9: bags[0].items[1]=(%d,%d)\n"
-    (cast int (get bags 0   Bag items -> psz Point x))
-    (cast int (get bags 0   Bag items -> psz Point y)))
-  (printf "9: bags[1].items[0]=(%d,%d)\n"
-    (cast int (get bags bsz Bag items -> 0   Point x))
-    (cast int (get bags bsz Bag items -> 0   Point y))))
+  (print "9: bags[0].items[1]=(%d,%d)\n"
+    (get bags 0   Bag items -> psz Point x)
+    (get bags 0   Bag items -> psz Point y))
+  (print "9: bags[1].items[0]=(%d,%d)\n"
+    (get bags bsz Bag items -> 0   Point x)
+    (get bags bsz Bag items -> 0   Point y)))
 
 ; ---------------------------------------------------------------------------
 ; 10. + as base → named chain (pointer arithmetic instead of offset step)
@@ -215,14 +214,14 @@
   (set! arr (* 3 sz) Point x 30)  (set! arr (* 3 sz) Point y 31)
   (let p2 (+ arr (* 2 sz)))
   (let p3 (+ arr (* 3 sz)))
-  (printf "10: [2]=(%d,%d) [3]=(%d,%d)\n"
-    (cast int (get p2 Point x))
-    (cast int (get p2 Point y))
-    (cast int (get p3 Point x))
-    (cast int (get p3 Point y)))
-  (printf "10: inline [1]=(%d,%d)\n"
-    (cast int (get (+ arr sz) Point x))
-    (cast int (get (+ arr sz) Point y))))
+  (print "10: [2]=(%d,%d) [3]=(%d,%d)\n"
+    (get p2 Point x)
+    (get p2 Point y)
+    (get p3 Point x)
+    (get p3 Point y))
+  (print "10: inline [1]=(%d,%d)\n"
+    (get (+ arr sz) Point x)
+    (get (+ arr sz) Point y)))
 
 ; ---------------------------------------------------------------------------
 ; 11. aref for inline-array field — get element pointer, read/write through it
@@ -238,13 +237,13 @@
   (set! (+ (aref g Grid cells) (* 2 sz)) Point x 25)  (set! (+ (aref g Grid cells) (* 2 sz)) Point y 26)
   ; aref gives cell base; navigate further with +
   (let base (aref g Grid cells))
-  (printf "11: [0]=(%d,%d) [1]=(%d,%d) [2]=(%d,%d)\n"
-    (cast int (get base Point x))
-    (cast int (get base Point y))
-    (cast int (get (+ base sz) Point x))
-    (cast int (get (+ base sz) Point y))
-    (cast int (get (+ base (* 2 sz)) Point x))
-    (cast int (get (+ base (* 2 sz)) Point y))))
+  (print "11: [0]=(%d,%d) [1]=(%d,%d) [2]=(%d,%d)\n"
+    (get base Point x)
+    (get base Point y)
+    (get (+ base sz) Point x)
+    (get (+ base sz) Point y)
+    (get (+ base (* 2 sz)) Point x)
+    (get (+ base (* 2 sz)) Point y)))
 
 ; ---------------------------------------------------------------------------
 ; 12. + on pointer-follow result (pointer-to-array via +)
@@ -261,13 +260,13 @@
   (set! bag Bag len n)
   (set! bag Bag items arr)
   (let base (get bag Bag items))   ; read pointer stored in items field
-  (printf "12: [0]=(%d,%d) [1]=(%d,%d) [2]=(%d,%d)\n"
-    (cast int (get base Point x))
-    (cast int (get base Point y))
-    (cast int (get (+ base sz) Point x))
-    (cast int (get (+ base sz) Point y))
-    (cast int (get (+ base (* 2 sz)) Point x))
-    (cast int (get (+ base (* 2 sz)) Point y))))
+  (print "12: [0]=(%d,%d) [1]=(%d,%d) [2]=(%d,%d)\n"
+    (get base Point x)
+    (get base Point y)
+    (get (+ base sz) Point x)
+    (get (+ base sz) Point y)
+    (get (+ base (* 2 sz)) Point x)
+    (get (+ base (* 2 sz)) Point y)))
 
 ; ---------------------------------------------------------------------------
 ; 13. set! combinations
@@ -278,8 +277,8 @@
   ; a) set! offset first → named chain
   (let arr (alloc (* 3 sz)))
   (set! arr (* 2 sz) Point x 42)
-  (printf "13a: arr[2].x=%d\n"
-    (cast int (get arr (* 2 sz) Point x)))
+  (print "13a: arr[2].x=%d\n"
+    (get arr (* 2 sz) Point x))
 
   ; b) set! offset → -> (array of pointers, write through)
   (let p (alloc sz))
@@ -287,8 +286,8 @@
   (let ptrs (alloc 8))
   (set! ptrs 0 p)
   (set! ptrs 0 -> Point x 77)
-  (printf "13b: after set! through ptr x=%d\n"
-    (cast int (get p Point x)))
+  (print "13b: after set! through ptr x=%d\n"
+    (get p Point x))
 
   ; c) set! named → ->
   (let n1 (alloc (sizeof Node)))
@@ -296,14 +295,14 @@
   (set! n1 Node nxt n2)
   (set! n2 Node val 0)
   (set! n1 Node nxt -> Node val 55)
-  (printf "13c: n2.val after set! through ->=%d\n"
-    (cast int (get n2 Node val)))
+  (print "13c: n2.val after set! through ->=%d\n"
+    (get n2 Node val))
 
   ; d) set! named → aref inline array
   (let g (alloc (+ (sizeof Grid) (* 3 sz))))
   (set! (+ (aref g Grid cells) sz) Point y 88)
-  (printf "13d: grid.cells[1].y=%d\n"
-    (cast int (get (+ (aref g Grid cells) sz) Point y)))
+  (print "13d: grid.cells[1].y=%d\n"
+    (get (+ (aref g Grid cells) sz) Point y))
 
   ; e) set! named → -> → offset
   (let arr2 (alloc (* 2 sz)))
@@ -311,9 +310,9 @@
   (set! bag Bag items arr2)
   (set! bag Bag items -> 0  Point x 33)
   (set! bag Bag items -> sz Point y 44)
-  (printf "13e: bag.items[0].x=%d bag.items[1].y=%d\n"
-    (cast int (get bag Bag items -> 0  Point x))
-    (cast int (get bag Bag items -> sz Point y))))
+  (print "13e: bag.items[0].x=%d bag.items[1].y=%d\n"
+    (get bag Bag items -> 0  Point x)
+    (get bag Bag items -> sz Point y)))
 
 ; ---------------------------------------------------------------------------
 ; main
@@ -321,29 +320,29 @@
 
 (with-arena
   (fn main ()
-    (printf "--- 1: array of structs (offset first → named) ---\n")
+    (print "--- 1: array of structs (offset first → named) ---\n")
     (test1-array-of-structs)
-    (printf "--- 2: array of pointers (offset → ->) ---\n")
+    (print "--- 2: array of pointers (offset → ->) ---\n")
     (test2-array-of-pointers)
-    (printf "--- 3: simple named chain ---\n")
+    (print "--- 3: simple named chain ---\n")
     (test3-simple-named-chain)
-    (printf "--- 4: deep named chain (embedded struct) ---\n")
+    (print "--- 4: deep named chain (embedded struct) ---\n")
     (test4-deep-named-chain)
-    (printf "--- 5: named chain → -> ---\n")
+    (print "--- 5: named chain → -> ---\n")
     (test5-field-is-pointer)
-    (printf "--- 6: multi-hop -> -> ---\n")
+    (print "--- 6: multi-hop -> -> ---\n")
     (test6-multi-hop)
-    (printf "--- 7: inline array in field (aref) ---\n")
+    (print "--- 7: inline array in field (aref) ---\n")
     (test7-inline-array-in-field)
-    (printf "--- 8: named → -> → offset (ptr-to-array in field) ---\n")
+    (print "--- 8: named → -> → offset (ptr-to-array in field) ---\n")
     (test8-ptr-to-array-in-field)
-    (printf "--- 9: array of bags (offset → -> → offset) ---\n")
+    (print "--- 9: array of bags (offset → -> → offset) ---\n")
     (test9-array-of-bags)
-    (printf "--- 10: + as base → named chain ---\n")
+    (print "--- 10: + as base → named chain ---\n")
     (test10-ptr-arith-base)
-    (printf "--- 11: aref for inline-array field ---\n")
+    (print "--- 11: aref for inline-array field ---\n")
     (test11-aref-inline-array)
-    (printf "--- 12: + on pointer-follow result ---\n")
+    (print "--- 12: + on pointer-follow result ---\n")
     (test12-ptr-arith-after-follow)
-    (printf "--- 13: set! combinations ---\n")
+    (print "--- 13: set! combinations ---\n")
     (test13-set-combinations)))

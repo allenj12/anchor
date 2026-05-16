@@ -3,7 +3,6 @@
 ;        enum constants, array-of-structs, get/set!
 
 (include <stdio.h>)
-(ffi printf (const char* ...) -> int)
 
 ; ---------------------------------------------------------------------------
 ; Basic struct — 2D point
@@ -73,10 +72,10 @@
 ; Access with (c-const Direction_North)
 
 (fn direction-name (d)
-  (if (== d (c-const Direction_North)) (printf "North\n")
-  (if (== d (c-const Direction_East))  (printf "East\n")
-  (if (== d (c-const Direction_South)) (printf "South\n")
-    (printf "West\n")))))
+  (if (== d (c-const Direction_North)) (print "North\n")
+  (if (== d (c-const Direction_East))  (print "East\n")
+  (if (== d (c-const Direction_South)) (print "South\n")
+    (print "West\n")))))
 
 ; ---------------------------------------------------------------------------
 ; Slice struct — store pointer + count (8 bytes each in new system)
@@ -106,10 +105,10 @@
   (let i 0)
   (while (< i n)
     (let p (+ buf (* i stride)))
-    (printf "  [%d] x=%d y=%d\n"
-      (cast int i)
-      (cast int (get p Point x))
-      (cast int (get p Point y)))
+    (print "  [%d] x=%d y=%d\n"
+      i
+      (get p Point x)
+      (get p Point y))
     (set! i (+ i 1))))
 
 ; ---------------------------------------------------------------------------
@@ -122,30 +121,30 @@
     ; basic struct
     (let a (make-point 3 4))
     (let b (make-point 6 8))
-    (printf "a=(%d,%d) b=(%d,%d)\n"
-      (cast int (get a Point x)) (cast int (get a Point y))
-      (cast int (get b Point x)) (cast int (get b Point y)))
-    (printf "squared distance: %d\n" (cast int (point-dist2 a b)))
+    (print "a=(%d,%d) b=(%d,%d)\n"
+      (get a Point x) (get a Point y)
+      (get b Point x) (get b Point y))
+    (print "squared distance: %d\n" (point-dist2 a b))
 
     ; nested struct
     (let box (make-aabb 10 20 50 80))
-    (printf "aabb width=%d height=%d\n"
-      (cast int (aabb-width box))
-      (cast int (aabb-height box)))
+    (print "aabb width=%d height=%d\n"
+      (aabb-width box)
+      (aabb-height box))
 
     ; union / type punning
-    (printf "int 0 as raw bits: %d\n"
-      (cast int (int-bits-as-float 0)))
+    (print "int 0 as raw bits: %d\n"
+      (int-bits-as-float 0))
 
     ; enum
-    (printf "direction: ")
+    (print "direction: ")
     (direction-name (c-const Direction_North))
-    (printf "direction: ")
+    (print "direction: ")
     (direction-name (c-const Direction_West))
 
     ; slice struct
     (let sl (make-slice 6))
-    (printf "slice len: %d\n" (cast int (slice-len sl)))
+    (print "slice len: %d\n" (slice-len sl))
 
     ; array of structs
     (let n 4)
@@ -157,5 +156,5 @@
       (set! p Point x (* i 10))
       (set! p Point y (* i 10))
       (set! i (+ i 1)))
-    (printf "points:\n")
+    (print "points:\n")
     (print-points pts n)))

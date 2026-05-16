@@ -79,17 +79,15 @@ Run a file:
 
 ```anchor
 (include <stdio.h>)
-(ffi printf (const char* ...) -> int)
 
 (fn main ()
-  (printf "Hello, Anchor!\n"))
+  (print "Hello, Anchor!\n"))
 ```
 
 ## A more involved example
 
 ```anchor
 (include <stdio.h>)
-(ffi printf (const char* ...) -> int)
 
 ; each: hygienic list iterator — _cur in the template never clashes with call-site vars
 (define-syntax each
@@ -124,18 +122,18 @@ Run a file:
     ; hygiene ensures they never collide
     (let _cur 99)
     (each n nums
-      (printf "%d " (cast int (add-base n))))
-    (printf "\n")
+      (print "%d " (add-base n)))
+    (print "\n")
 
     (let sum (fold nums (lambda (x acc) (return (+ x acc))) 0))
-    (printf "sum: %d\n" (cast int sum))
+    (print "sum: %d\n" sum)
 
     ; unroll inlines 4 increments — no branch, no loop counter in the generated C
     (let ticks 0)
     (unroll 4 (set! ticks (+ ticks 1)))
-    (printf "ticks: %d\n" (cast int ticks))
+    (print "ticks: %d\n" ticks)
 
-    (printf "_cur: %d\n" (cast int _cur))))
+    (print "_cur: %d\n" _cur)))
 ```
 
 `with-arena` attaches a heap arena to the function. All `alloc` calls inside use it;
@@ -152,8 +150,8 @@ everything is freed on return. The default size is 1 MB.
 (set! x (+ x 1))   ; mutate
 
 (if (> x 5)
-  (printf "big\n")
-  (printf "small\n"))
+  (print "big\n")
+  (print "small\n"))
 
 (while (< x 100)
   (set! x (* x 2)))
@@ -175,8 +173,8 @@ as in C — they apply to the innermost enclosing `while`.
 `when` and `unless` are one-armed conditionals:
 
 ```anchor
-(when (< x 10) (printf "small\n"))
-(unless (> x 10) (printf "not large\n"))
+(when (< x 10) (print "small\n"))
+(unless (> x 10) (print "not large\n"))
 ```
 
 `cond` chains tests with an optional `else`. Single-form clauses execute as
@@ -184,10 +182,10 @@ statements (useful for inline bindings):
 
 ```anchor
 (cond
-  [(< x 0)  (printf "negative\n")]
+  [(< x 0)  (print "negative\n")]
   [(let abs (- 0 x))]
-  [(< abs 10) (printf "small\n")]
-  [else (printf "big\n")])
+  [(< abs 10) (print "small\n")]
+  [else (print "big\n")])
 ```
 
 ### Functions
@@ -239,7 +237,7 @@ Create them with `(f32 expr)`:
 (let a (f32 3.14))          ; f32 literal
 (let b (f32 2.0))
 (let c (f32+ a b))          ; f32 arithmetic
-(printf "%f\n" (cast double (f32->f64 c)))  ; widen to f64, cast for printf
+(print "%f\n" (f32->f64 c))                 ; widen to f64 for printing
 ```
 
 **Conversions** use the `->` family, which actually converts between representations:
@@ -258,11 +256,11 @@ Create them with `(f32 expr)`:
 already holds. The `->` functions actually convert between representations:
 
 ```anchor
-; cast = "this is already a double, unwrap it for C"
-(printf "%f\n" (cast double 3.14))
+; 3.14 is already f64 — print uses it directly
+(print "%f\n" 3.14)
 
-; -> = "convert this integer into f64 representation, then unwrap"
-(printf "%f\n" (cast double (int->f64 42)))
+; -> = "convert this integer into f64 representation"
+(print "%f\n" (int->f64 42))
 ```
 
 **FFI and floats:** Both `ffi` and `fn-c` respect C types at the boundary. A `float`
@@ -380,7 +378,7 @@ cast it explicitly:
 
 ```anchor
 (fn-c greet ((const char* name)) -> void
-  (printf "Hello, %s\n" (cast char* name)))   ; cast needed — name is AnchorVal
+  (print "Hello, %s\n" name))   ; print auto-casts to char* for %s
 ```
 
 ### Lambda and closures
@@ -592,7 +590,7 @@ as a signed integer. Useful for debugging or capacity checks:
 ```anchor
 (let free (arena-remaining))
 (if (< free (mb 1))
-  (printf "arena nearly full\n"))
+  (print "arena nearly full\n"))
 ```
 
 `(arena-in? ptr)` returns `1` if `ptr` falls within the current arena's buffer, `0`
@@ -601,7 +599,7 @@ otherwise. Useful for asserting that a pointer was allocated from the expected a
 ```anchor
 (let node (alloc (sizeof Node)))
 (if (! (arena-in? node))
-  (printf "unexpected allocation source\n"))
+  (print "unexpected allocation source\n"))
 ```
 
 `(ref expr)` takes the address of a value; `(deref ptr)` reads through one. When
@@ -615,7 +613,7 @@ complex expressions, a temporary is created.
 
 ; useful for treating a scalar as a C string (e.g. packed symbols)
 (let s (sym hello))
-(printf "%s\n" (cast char* (ref s)))   ; prints "hello"
+(print "%s\n" (ref s))   ; prints "hello"
 ```
 
 ### Structs
@@ -749,7 +747,7 @@ Emit `#define` constants. Access them with `(c-const Name_Variant)`.
   (North 0) (East 1) (South 2) (West 3))
 
 (if (== dir (c-const Direction_North))
-  (printf "heading north\n"))
+  (print "heading north\n"))
 ```
 
 Auto-incrementing (omit the value):
@@ -831,7 +829,7 @@ level; `null?` simply tests whether the value is zero.
 
 (let cur lst)
 (while (! (null? cur))
-  (printf "%d\n" (cast int (car cur)))
+  (print "%d\n" (car cur))
   (set! cur (cdr cur)))
 ```
 
@@ -848,22 +846,22 @@ level; `null?` simply tests whether the value is zero.
 
 ```anchor
 ;; range
-(for range (i 10) (printf "%lld " i))           ; 0 to 9
-(for range (i 3 8) (printf "%lld " i))           ; 3 to 7
+(for range (i 10) (print "%lld " i))           ; 0 to 9
+(for range (i 3 8) (print "%lld " i))           ; 3 to 7
 
 ;; untyped array
-(for each (val arr len) (printf "%lld " val))
-(for each ((val i) arr len) (printf "%lld:%lld " i val))
+(for each (val arr len) (print "%lld " val))
+(for each ((val i) arr len) (print "%lld:%lld " i val))
 
 ;; typed struct array
 (for each (Point p points count)
-  (printf "(%lld,%lld) " (get p Point x) (get p Point y)))
+  (print "(%lld,%lld) " (get p Point x) (get p Point y)))
 (for each (Point (p i) points count)
   (set! p Point x (* i 10)))
 
 ;; cons list
-(for each (v lst ->) (printf "%lld " v))
-(for each ((v i) lst ->) (printf "%lld:%lld " i v))
+(for each (v lst ->) (print "%lld " v))
+(for each ((v i) lst ->) (print "%lld:%lld " i v))
 ```
 
 Limits, lengths, and counts are evaluated once. Untyped array iteration uses an offset-bump pattern that keeps the base pointer loop-invariant, enabling SIMD auto-vectorization in the generated C.
@@ -879,9 +877,9 @@ zero, so `(ref s)` yields a valid null-terminated C string for free.
 (let other  (sym waiting))
 
 (if (== status (sym ready))    ; single integer comparison
-  (printf "go!\n"))
+  (print "go!\n"))
 
-(printf "status: %s\n" (cast char* (ref status)))   ; prints "ready"
+(print "status: %s\n" (ref status))   ; prints "ready"
 ```
 
 `sym` is a macro that runs at compile time. The identifier is converted to a UTF-8
@@ -1092,8 +1090,8 @@ get a handle carrying the call-site marks:
         (if ,(datum->syntax self 'it) ,then ,else-clause))]))
 
 (aif (find-item key table)
-  (printf "found: %d\n" (cast int it))
-  (printf "not found\n"))
+  (print "found: %d\n" it)
+  (print "not found\n"))
 ```
 
 `it` inside `then` refers to the macro-introduced binding, not any outer `it`.

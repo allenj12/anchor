@@ -1,5 +1,4 @@
 (include <stdio.h>)
-(ffi printf (const char* ...) -> int)
 
 ;; ---------------------------------------------------------------------------
 ;; coroutine: core state-machine macro.
@@ -354,18 +353,18 @@
   (fn main ()
 
     ;; Test 1: basic generator — no params
-    (printf "--- test 1: simple ---\n")
+    (print "--- test 1: simple ---\n")
     (let g1 (make-generator ()
               (yield 10)
               (yield 20)
               (yield 30)))
-    (printf "%lld\n" (g1))   ;; 10
-    (printf "%lld\n" (g1))   ;; 20
-    (printf "%lld\n" (g1))   ;; 30
-    (printf "%lld\n" (g1))   ;; -1
+    (print "%lld\n" (g1))   ;; 10
+    (print "%lld\n" (g1))   ;; 20
+    (print "%lld\n" (g1))   ;; 30
+    (print "%lld\n" (g1))   ;; -1
 
     ;; Test 2: counter with variable persistence
-    (printf "--- test 2: counter ---\n")
+    (print "--- test 2: counter ---\n")
     (let g2 (make-generator ()
               (let i 0)
               (yield i)
@@ -373,39 +372,39 @@
               (yield i)
               (set! i (+ i 1))
               (yield i)))
-    (printf "%lld\n" (g2))   ;; 0
-    (printf "%lld\n" (g2))   ;; 1
-    (printf "%lld\n" (g2))   ;; 2
-    (printf "%lld\n" (g2))   ;; -1
+    (print "%lld\n" (g2))   ;; 0
+    (print "%lld\n" (g2))   ;; 1
+    (print "%lld\n" (g2))   ;; 2
+    (print "%lld\n" (g2))   ;; -1
 
     ;; Test 3: while loop
-    (printf "--- test 3: while ---\n")
+    (print "--- test 3: while ---\n")
     (let g3 (make-generator ()
               (let i 0)
               (while (< i 5)
                 (yield i)
                 (set! i (+ i 1)))))
-    (printf "%lld\n" (g3))   ;; 0
-    (printf "%lld\n" (g3))   ;; 1
-    (printf "%lld\n" (g3))   ;; 2
-    (printf "%lld\n" (g3))   ;; 3
-    (printf "%lld\n" (g3))   ;; 4
-    (printf "%lld\n" (g3))   ;; -1
+    (print "%lld\n" (g3))   ;; 0
+    (print "%lld\n" (g3))   ;; 1
+    (print "%lld\n" (g3))   ;; 2
+    (print "%lld\n" (g3))   ;; 3
+    (print "%lld\n" (g3))   ;; 4
+    (print "%lld\n" (g3))   ;; -1
 
     ;; Test 4: if/else with yields
-    (printf "--- test 4: if/else ---\n")
+    (print "--- test 4: if/else ---\n")
     (let g4 (make-generator ()
               (let x 10)
               (if (> x 5)
                 (yield 1)
                 (yield 0))
               (yield 99)))
-    (printf "%lld\n" (g4))   ;; 1  (x=10 > 5)
-    (printf "%lld\n" (g4))   ;; 99
-    (printf "%lld\n" (g4))   ;; -1
+    (print "%lld\n" (g4))   ;; 1  (x=10 > 5)
+    (print "%lld\n" (g4))   ;; 99
+    (print "%lld\n" (g4))   ;; -1
 
     ;; Test 5: fibonacci with while loop
-    (printf "--- test 5: fibonacci ---\n")
+    (print "--- test 5: fibonacci ---\n")
     (let fib (make-generator ()
                (let a 0)
                (let b 1)
@@ -414,58 +413,58 @@
                  (let t (+ a b))
                  (set! a b)
                  (set! b t))))
-    (printf "%lld\n" (fib))  ;; 0
-    (printf "%lld\n" (fib))  ;; 1
-    (printf "%lld\n" (fib))  ;; 1
-    (printf "%lld\n" (fib))  ;; 2
-    (printf "%lld\n" (fib))  ;; 3
-    (printf "%lld\n" (fib))  ;; 5
-    (printf "%lld\n" (fib))  ;; 8
-    (printf "%lld\n" (fib))  ;; 13
+    (print "%lld\n" (fib))  ;; 0
+    (print "%lld\n" (fib))  ;; 1
+    (print "%lld\n" (fib))  ;; 1
+    (print "%lld\n" (fib))  ;; 2
+    (print "%lld\n" (fib))  ;; 3
+    (print "%lld\n" (fib))  ;; 5
+    (print "%lld\n" (fib))  ;; 8
+    (print "%lld\n" (fib))  ;; 13
 
     ;; Test 6: if without else — filter even numbers
-    (printf "--- test 6: filter evens ---\n")
+    (print "--- test 6: filter evens ---\n")
     (let g6 (make-generator ()
               (let i 0)
               (while (< i 10)
                 (if (== (% i 2) 0)
                   (yield i))
                 (set! i (+ i 1)))))
-    (printf "%lld\n" (g6))   ;; 0
-    (printf "%lld\n" (g6))   ;; 2
-    (printf "%lld\n" (g6))   ;; 4
-    (printf "%lld\n" (g6))   ;; 6
-    (printf "%lld\n" (g6))   ;; 8
-    (printf "%lld\n" (g6))   ;; -1
+    (print "%lld\n" (g6))   ;; 0
+    (print "%lld\n" (g6))   ;; 2
+    (print "%lld\n" (g6))   ;; 4
+    (print "%lld\n" (g6))   ;; 6
+    (print "%lld\n" (g6))   ;; 8
+    (print "%lld\n" (g6))   ;; -1
 
     ;; Test 7: code after while loop
-    (printf "--- test 7: yield after while ---\n")
+    (print "--- test 7: yield after while ---\n")
     (let g7 (make-generator ()
               (let i 0)
               (while (< i 3)
                 (yield i)
                 (set! i (+ i 1)))
               (yield 99)))
-    (printf "%lld\n" (g7))   ;; 0
-    (printf "%lld\n" (g7))   ;; 1
-    (printf "%lld\n" (g7))   ;; 2
-    (printf "%lld\n" (g7))   ;; 99
-    (printf "%lld\n" (g7))   ;; -1
+    (print "%lld\n" (g7))   ;; 0
+    (print "%lld\n" (g7))   ;; 1
+    (print "%lld\n" (g7))   ;; 2
+    (print "%lld\n" (g7))   ;; 99
+    (print "%lld\n" (g7))   ;; -1
 
     ;; Test 8: for macro (expands to while) with yield
-    (printf "--- test 8: for macro ---\n")
+    (print "--- test 8: for macro ---\n")
     (let g8 (make-generator ()
               (for i in 5
                 (yield i))))
-    (printf "%lld\n" (g8))   ;; 0
-    (printf "%lld\n" (g8))   ;; 1
-    (printf "%lld\n" (g8))   ;; 2
-    (printf "%lld\n" (g8))   ;; 3
-    (printf "%lld\n" (g8))   ;; 4
-    (printf "%lld\n" (g8))   ;; -1
+    (print "%lld\n" (g8))   ;; 0
+    (print "%lld\n" (g8))   ;; 1
+    (print "%lld\n" (g8))   ;; 2
+    (print "%lld\n" (g8))   ;; 3
+    (print "%lld\n" (g8))   ;; 4
+    (print "%lld\n" (g8))   ;; -1
 
     ;; Test 9: break inside while
-    (printf "--- test 9: break ---\n")
+    (print "--- test 9: break ---\n")
     (let g9 (make-generator ()
               (let i 0)
               (while 1
@@ -473,46 +472,46 @@
                 (yield i)
                 (set! i (+ i 1)))
               (yield 99)))
-    (printf "%lld\n" (g9))   ;; 0
-    (printf "%lld\n" (g9))   ;; 1
-    (printf "%lld\n" (g9))   ;; 2
-    (printf "%lld\n" (g9))   ;; 3
-    (printf "%lld\n" (g9))   ;; 4
-    (printf "%lld\n" (g9))   ;; 99  (after loop)
-    (printf "%lld\n" (g9))   ;; -1
+    (print "%lld\n" (g9))   ;; 0
+    (print "%lld\n" (g9))   ;; 1
+    (print "%lld\n" (g9))   ;; 2
+    (print "%lld\n" (g9))   ;; 3
+    (print "%lld\n" (g9))   ;; 4
+    (print "%lld\n" (g9))   ;; 99  (after loop)
+    (print "%lld\n" (g9))   ;; -1
 
     ;; Test 10: continue inside while (skip odd)
-    (printf "--- test 10: continue ---\n")
+    (print "--- test 10: continue ---\n")
     (let g10 (make-generator ()
                (let i 0)
                (while (< i 10)
                  (set! i (+ i 1))
                  (if (== (% i 2) 1) (continue))
                  (yield i))))
-    (printf "%lld\n" (g10))  ;; 2
-    (printf "%lld\n" (g10))  ;; 4
-    (printf "%lld\n" (g10))  ;; 6
-    (printf "%lld\n" (g10))  ;; 8
-    (printf "%lld\n" (g10))  ;; 10
-    (printf "%lld\n" (g10))  ;; -1
+    (print "%lld\n" (g10))  ;; 2
+    (print "%lld\n" (g10))  ;; 4
+    (print "%lld\n" (g10))  ;; 6
+    (print "%lld\n" (g10))  ;; 8
+    (print "%lld\n" (g10))  ;; 10
+    (print "%lld\n" (g10))  ;; -1
 
     ;; Test 11: parameterized range generator
-    (printf "--- test 11: range(lo, hi) ---\n")
+    (print "--- test 11: range(lo, hi) ---\n")
     (let range (make-generator (lo hi)
                  (let i lo)
                  (while (< i hi)
                    (yield i)
                    (set! i (+ i 1)))))
     (let r1 (range 3 8))
-    (printf "%lld\n" (r1))   ;; 3
-    (printf "%lld\n" (r1))   ;; 4
-    (printf "%lld\n" (r1))   ;; 5
-    (printf "%lld\n" (r1))   ;; 6
-    (printf "%lld\n" (r1))   ;; 7
-    (printf "%lld\n" (r1))   ;; -1
+    (print "%lld\n" (r1))   ;; 3
+    (print "%lld\n" (r1))   ;; 4
+    (print "%lld\n" (r1))   ;; 5
+    (print "%lld\n" (r1))   ;; 6
+    (print "%lld\n" (r1))   ;; 7
+    (print "%lld\n" (r1))   ;; -1
 
     ;; Test 12: two instances from same factory
-    (printf "--- test 12: two instances ---\n")
+    (print "--- test 12: two instances ---\n")
     (let range2 (make-generator (lo hi)
                   (let i lo)
                   (while (< i hi)
@@ -520,13 +519,13 @@
                     (set! i (+ i 1)))))
     (let a (range2 0 3))
     (let b (range2 10 13))
-    (printf "a=%lld b=%lld\n" (a) (b))   ;; a=0 b=10
-    (printf "a=%lld b=%lld\n" (a) (b))   ;; a=1 b=11
-    (printf "a=%lld b=%lld\n" (a) (b))   ;; a=2 b=12
-    (printf "a=%lld b=%lld\n" (a) (b))   ;; a=-1 b=-1
+    (print "a=%lld b=%lld\n" (a) (b))   ;; a=0 b=10
+    (print "a=%lld b=%lld\n" (a) (b))   ;; a=1 b=11
+    (print "a=%lld b=%lld\n" (a) (b))   ;; a=2 b=12
+    (print "a=%lld b=%lld\n" (a) (b))   ;; a=-1 b=-1
 
     ;; Test 13: parameterized fibonacci (n terms)
-    (printf "--- test 13: fib(n) ---\n")
+    (print "--- test 13: fib(n) ---\n")
     (let make-fib (make-generator (n)
                     (let a 0)
                     (let b 1)
@@ -538,52 +537,52 @@
                       (set! b t)
                       (set! count (+ count 1)))))
     (let f (make-fib 8))
-    (printf "%lld\n" (f))    ;; 0
-    (printf "%lld\n" (f))    ;; 1
-    (printf "%lld\n" (f))    ;; 1
-    (printf "%lld\n" (f))    ;; 2
-    (printf "%lld\n" (f))    ;; 3
-    (printf "%lld\n" (f))    ;; 5
-    (printf "%lld\n" (f))    ;; 8
-    (printf "%lld\n" (f))    ;; 13
-    (printf "%lld\n" (f))    ;; -1
+    (print "%lld\n" (f))    ;; 0
+    (print "%lld\n" (f))    ;; 1
+    (print "%lld\n" (f))    ;; 1
+    (print "%lld\n" (f))    ;; 2
+    (print "%lld\n" (f))    ;; 3
+    (print "%lld\n" (f))    ;; 5
+    (print "%lld\n" (f))    ;; 8
+    (print "%lld\n" (f))    ;; 13
+    (print "%lld\n" (f))    ;; -1
 
     ;; Test 14: for in generator with squares
-    (printf "--- test 14: for in generator ---\n")
+    (print "--- test 14: for in generator ---\n")
     (let g14 (make-generator ()
                (for i in 5
                  (yield (* i i)))))
-    (printf "%lld\n" (g14))  ;; 0
-    (printf "%lld\n" (g14))  ;; 1
-    (printf "%lld\n" (g14))  ;; 4
-    (printf "%lld\n" (g14))  ;; 9
-    (printf "%lld\n" (g14))  ;; 16
-    (printf "%lld\n" (g14))  ;; -1
+    (print "%lld\n" (g14))  ;; 0
+    (print "%lld\n" (g14))  ;; 1
+    (print "%lld\n" (g14))  ;; 4
+    (print "%lld\n" (g14))  ;; 9
+    (print "%lld\n" (g14))  ;; 16
+    (print "%lld\n" (g14))  ;; -1
 
     ;; Test 15: make-async — resume with input
-    (printf "--- test 15: async basic ---\n")
+    (print "--- test 15: async basic ---\n")
     (let g15 (make-async (reply) ()
                (yield 1)
-               (printf "got: %lld\n" reply)
+               (print "got: %lld\n" reply)
                (yield 2)
-               (printf "got: %lld\n" reply)
+               (print "got: %lld\n" reply)
                (yield 3)))
-    (printf "req: %lld\n" (g15 0))    ;; req: 1  (first call, reply=0 unused)
-    (printf "req: %lld\n" (g15 42))   ;; got: 42, req: 2
-    (printf "req: %lld\n" (g15 99))   ;; got: 99, req: 3
-    (printf "req: %lld\n" (g15 0))    ;; req: -1
+    (print "req: %lld\n" (g15 0))    ;; req: 1  (first call, reply=0 unused)
+    (print "req: %lld\n" (g15 42))   ;; got: 42, req: 2
+    (print "req: %lld\n" (g15 99))   ;; got: 99, req: 3
+    (print "req: %lld\n" (g15 0))    ;; req: -1
 
     ;; Test 16: make-async with params — accumulator
-    (printf "--- test 16: async accumulator ---\n")
+    (print "--- test 16: async accumulator ---\n")
     (let make-accum (make-async (val) (start)
                       (let sum start)
                       (while 1
                         (yield sum)
                         (set! sum (+ sum val)))))
     (let acc (make-accum 100))
-    (printf "%lld\n" (acc 0))    ;; 100 (initial sum, val=0 ignored)
-    (printf "%lld\n" (acc 5))    ;; 105
-    (printf "%lld\n" (acc 10))   ;; 115
-    (printf "%lld\n" (acc 1))    ;; 116
+    (print "%lld\n" (acc 0))    ;; 100 (initial sum, val=0 ignored)
+    (print "%lld\n" (acc 5))    ;; 105
+    (print "%lld\n" (acc 10))   ;; 115
+    (print "%lld\n" (acc 1))    ;; 116
 
     (return 0)))

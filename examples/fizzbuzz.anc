@@ -2,7 +2,6 @@
 ; Shows: functions, while loops, conditionals, modulo, FFI
 
 (include <stdio.h>)
-(ffi printf (const char* ...) -> int)
 
 (fn divisible? (n d)
   (return (== (% n d) 0)))
@@ -11,12 +10,12 @@
   (let fizz (divisible? n 3))
   (let buzz (divisible? n 5))
   (if (&& fizz buzz)
-    (printf "FizzBuzz\n")
+    (print "FizzBuzz\n")
     (if fizz
-      (printf "Fizz\n")
+      (print "Fizz\n")
       (if buzz
-        (printf "Buzz\n")
-        (printf "%d\n" (cast int n))))))
+        (print "Buzz\n")
+        (print "%d\n" n)))))
 
 (with-arena
   (fn main ()
