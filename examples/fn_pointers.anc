@@ -23,13 +23,13 @@
 ;; for the body; return is cast back to the C return type.
 
 (fn-c cmp-asc ((const void* a) (const void* b)) -> int
-  (let av (deref (cast intptr_t* a)))
-  (let bv (deref (cast intptr_t* b)))
+  (let av (deref a))
+  (let bv (deref b))
   (return (- av bv)))
 
 (fn-c cmp-desc ((const void* a) (const void* b)) -> int
-  (let av (deref (cast intptr_t* a)))
-  (let bv (deref (cast intptr_t* b)))
+  (let av (deref a))
+  (let bv (deref b))
   (return (- bv av)))
 
 (fn print-arr (arr n)
@@ -45,7 +45,7 @@
 ;; signature so the compiler emits the correct cast.
 
 (fn sort-with (arr n fp)
-  (qsort arr (cast size_t n) 8 fp))
+  (qsort arr n 8 fp))
 
 (with-arena
   (fn main ()

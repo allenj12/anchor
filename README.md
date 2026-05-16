@@ -356,8 +356,8 @@ normally; the return value is cast back to the declared C type.
 (include <stdlib.h>)
 
 (fn-c compare-ints ((const void* a) (const void* b)) -> int
-  (let av (deref (cast intptr_t* a)))
-  (let bv (deref (cast intptr_t* b)))
+  (let av (deref a))
+  (let bv (deref b))
   (return (- av bv)))
 
 ; qsort needs a C comparator — fn-c is it
